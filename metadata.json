@@ -1,0 +1,5 @@
+{
+  "name": "JobToken Portal",
+  "description": "A pay-per-application job board proof-of-concept with Supabase integration and token-based economy.",
+  "requestFramePermissions": []
+}
