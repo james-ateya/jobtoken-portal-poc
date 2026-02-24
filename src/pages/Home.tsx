@@ -112,8 +112,9 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
       } else {
         showToast(result.error || "Topup failed", "error");
       }
-    } catch (error) {
-      showToast("Network error occurred", "error");
+    } catch (error: any) {
+      console.error("Topup error:", error);
+      showToast(error.message === "Failed to fetch" ? "Network error: Could not connect to server" : `Error: ${error.message}`, "error");
     } finally {
       setIsTopupLoading(false);
     }

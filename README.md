@@ -41,8 +41,27 @@ This is a full-stack job board application built with React (Vite), Express, Sup
    ```
    The app will be available at `http://localhost:3000`.
 
-## Scripts
+## Deployment
 
-- `npm run dev`: Starts the Express server with Vite middleware.
-- `npm run build`: Builds the frontend for production.
-- `npm run lint`: Runs TypeScript type checking.
+### Vercel
+
+This project is configured for easy deployment on Vercel:
+
+1. **Connect your repository** to Vercel.
+2. **Environment Variables**: Add the following variables in the Vercel Dashboard:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `RESEND_API_KEY`
+   - `APP_URL` (Set to your Vercel deployment URL)
+3. **Build Settings**: Vercel should automatically detect the settings from `vercel.json`.
+   - Build Command: `npm run build`
+   - Output Directory: `dist`
+
+## Troubleshooting
+
+### "Cannot find package 'cors'" Error
+If you see this error in VS Code or when running the app:
+1. **Run `npm install`**: Ensure all new dependencies are downloaded.
+2. **Restart VS Code**: Sometimes the TypeScript server needs a refresh.
+3. **Check `node_modules`**: Verify that `node_modules/cors` exists.

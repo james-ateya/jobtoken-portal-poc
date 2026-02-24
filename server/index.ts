@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
@@ -10,6 +11,7 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+app.use(cors());
 
 // Supabase Admin Client
 const supabaseAdmin = createClient(
@@ -89,13 +91,27 @@ app.post("/api/topup", async (req, res) => {
   const { userId } = req.body;
 
   try {
-    const { data: wallet, error: walletError } = await supabaseAdmin
+    let { data: wallet, error: walletError } = await supabaseAdmin
       .from("wallets")
       .select("id, token_balance")
       .eq("user_id", userId)
       .single();
 
-    if (walletError || !wallet) throw new Error("Wallet not found");
+    // If wallet doesn't exist, create it
+    if (walletError && walletError.code === 'PGRST116') {
+      const { data: newWallet, error: createError } = await supabaseAdmin
+        .from("wallets")
+        .insert({ user_id: userId, token_balance: 0 })
+        .select()
+        .single();
+      
+      if (createError) throw createError;
+      wallet = newWallet;
+    } else if (walletError) {
+      throw walletError;
+    }
+
+    if (!wallet) throw new Error("Wallet could not be initialized");
 
     const refId = `MPESA-${Math.random().toString(36).toUpperCase().slice(2, 10)}`;
 
@@ -131,7 +147,8 @@ app.post("/api/topup", async (req, res) => {
 
     res.json({ success: true, newBalance: wallet.token_balance + 5 });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Topup error:", error);
+    res.status(500).json({ error: error.message || "Internal server error" });
   }
 });
 
@@ -507,21 +524,28 @@ app.get("/api/admin/global-search", async (req, res) => {
   }
 });
 
+// Export the app for Vercel
+export default app;
+
 // Vite middleware for development
 async function setupVite() {
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+    
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  } else if (!process.env.VERCEL) {
+    // In production (non-Vercel), serve static files and listen
     app.use(express.static("dist"));
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
 }
 
 setupVite();
