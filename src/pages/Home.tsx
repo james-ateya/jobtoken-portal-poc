@@ -1,19 +1,25 @@
-import { useState, useEffect } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useState, useEffect, useMemo } from "react";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
+import { fetchOpenJobsWithEmployer } from "../lib/fetchOpenJobs";
+import { BUSINESS_AREAS, areasFocusMatch } from "../lib/businessAreas";
 import { JobCard } from "../components/JobCard";
 import { JobDetailModal } from "../components/JobDetailModal";
+import { CompanyProfileSeekerModal } from "../components/CompanyProfileSeekerModal";
 import { WalletDashboard } from "../components/WalletDashboard";
 import { RefreshCw, LayoutDashboard, Briefcase } from "lucide-react";
 
 export function HomePage({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
   const [jobs, setJobs] = useState<any[]>([]);
   const [filter, setFilter] = useState<string>("all");
+  const [professionFilter, setProfessionFilter] = useState<string>("all");
+  const [myProfession, setMyProfession] = useState<string | null>(null);
   const [balance, setBalance] = useState(0);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState<string | null>(null);
   const [userApplications, setUserApplications] = useState<string[]>([]);
   const [detailJob, setDetailJob] = useState<any | null>(null);
+  const [companyProfileJob, setCompanyProfileJob] = useState<any | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -22,8 +28,20 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
     if (user) {
       fetchWallet(user.id);
       fetchUserApplications(user.id);
+      fetchSeekerProfession(user.id);
+    } else {
+      setMyProfession(null);
     }
   }, [user]);
+
+  const fetchSeekerProfession = async (userId: string) => {
+    const { data } = await supabase
+      .from("profiles")
+      .select("profession_or_study")
+      .eq("id", userId)
+      .maybeSingle();
+    setMyProfession((data as { profession_or_study?: string | null } | null)?.profession_or_study ?? null);
+  };
 
   useEffect(() => {
     const id = (location.state as { highlightJobId?: string } | null)?.highlightJobId;
@@ -34,25 +52,8 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
   }, [jobs, location.state, navigate]);
 
   const fetchJobs = async () => {
-    let { data, error } = await supabase
-      .from("jobs")
-      .select("*")
-      .order("is_featured", { ascending: false })
-      .order("created_at", { ascending: false });
-    if (error) {
-      const fallback = await supabase
-        .from("jobs")
-        .select("*")
-        .order("created_at", { ascending: false });
-      data = fallback.data;
-    }
-    if (data) {
-      const active = data.filter(
-        (j: { closes_at?: string | null }) =>
-          !j.closes_at || new Date(j.closes_at) > new Date()
-      );
-      setJobs(active);
-    }
+    const active = await fetchOpenJobsWithEmployer(supabase);
+    setJobs(active);
   };
 
   const fetchUserApplications = async (userId: string) => {
@@ -124,12 +125,32 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
     }
   };
 
-  const filteredJobs = filter === "all" 
-    ? jobs 
-    : jobs.filter(job => job.job_type === filter);
+  const filteredJobs = useMemo(() => {
+    let list = jobs;
+    if (filter !== "all") list = list.filter((job) => job.job_type === filter);
+
+    if (professionFilter === "my_profession") {
+      if (myProfession?.trim()) {
+        list = list.filter((j: any) => areasFocusMatch(j.area_of_business, myProfession));
+      } else {
+        list = [];
+      }
+    } else if (professionFilter !== "all") {
+      list = list.filter((j: any) => areasFocusMatch(j.area_of_business, professionFilter));
+    }
+
+    return list;
+  }, [jobs, filter, professionFilter, myProfession]);
 
   return (
     <>
+      <CompanyProfileSeekerModal
+        open={!!companyProfileJob}
+        onClose={() => setCompanyProfileJob(null)}
+        jobTitle={companyProfileJob?.title ?? null}
+        employer={companyProfileJob?.employer ?? null}
+      />
+
       <JobDetailModal
         job={detailJob}
         onClose={() => setDetailJob(null)}
@@ -139,6 +160,9 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
         isApplying={detailJob ? isApplying === detailJob.id : false}
         hasApplied={detailJob ? userApplications.includes(detailJob.id) : false}
         hideApply={user?.user_metadata?.role === "employer"}
+        onViewCompany={() => {
+          if (detailJob) setCompanyProfileJob(detailJob);
+        }}
       />
     <main className="max-w-7xl mx-auto px-6 py-12">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
@@ -148,13 +172,28 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
               <h2 className="text-3xl font-bold tracking-tight">Available Jobs</h2>
               <p className="text-zinc-500 mt-1">Find your next career move and apply with tokens.</p>
             </div>
-            <div className="flex items-center gap-3">
-              <select 
+            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 w-full sm:w-auto">
+              <select
+                value={professionFilter}
+                onChange={(e) => setProfessionFilter(e.target.value)}
+                className="select-themed !py-2 min-w-[12rem] flex-1 sm:flex-initial"
+              >
+                <option value="all">All professions</option>
+                {user ? (
+                  <option value="my_profession">My profession (profile)</option>
+                ) : null}
+                {BUSINESS_AREAS.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+              <select
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-zinc-300 focus:outline-none focus:border-emerald-500 transition-colors appearance-none"
+                className="select-themed !py-2 min-w-[10rem] flex-1 sm:flex-initial"
               >
-                <option value="all">All Types</option>
+                <option value="all">All job types</option>
                 <option value="Remote">Remote</option>
                 <option value="Onsite">Onsite</option>
                 <option value="Online">Online</option>
@@ -166,6 +205,16 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
             </div>
           </div>
 
+          {professionFilter === "my_profession" && user && !myProfession?.trim() ? (
+            <p className="text-sm text-amber-500/90 -mt-4">
+              Set your{" "}
+              <Link to="/dashboard/profile" className="underline hover:text-amber-400">
+                profession or area of study
+              </Link>{" "}
+              to use this filter, or choose a specific profession above.
+            </p>
+          ) : null}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {filteredJobs.length > 0 ? (
               filteredJobs.map((job) => (
@@ -174,6 +223,7 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
                   job={job}
                   onApply={handleApply}
                   onViewDetails={user ? (j) => setDetailJob(j) : undefined}
+                  onViewCompany={(j) => setCompanyProfileJob(j)}
                   isApplying={isApplying === job.id}
                   isGuest={!user}
                   hasApplied={userApplications.includes(job.id)}
@@ -183,8 +233,24 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
             ) : (
               <div className="col-span-full p-12 rounded-3xl border border-dashed border-white/10 bg-white/[0.02] text-center">
                 <Briefcase className="w-12 h-12 text-zinc-600 mx-auto mb-4 opacity-20" />
-                <h3 className="text-lg font-medium text-zinc-400">No jobs available right now</h3>
-                <p className="text-sm text-zinc-500 mt-2">Check back later for new opportunities.</p>
+                <h3 className="text-lg font-medium text-zinc-400">No jobs match your filters</h3>
+                <p className="text-sm text-zinc-500 mt-2">
+                  {jobs.length === 0
+                    ? "Check back later for new opportunities."
+                    : "Try another profession or job type."}
+                </p>
+                {jobs.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilter("all");
+                      setProfessionFilter("all");
+                    }}
+                    className="mt-4 text-xs font-bold text-emerald-400 hover:text-emerald-300"
+                  >
+                    Clear filters
+                  </button>
+                ) : null}
               </div>
             )}
           </div>

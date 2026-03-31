@@ -8,11 +8,14 @@ import { DashboardPage } from "./pages/Dashboard";
 import { EmployerDashboard } from "./pages/EmployerDashboard";
 import { EmployerApplicationsPage } from "./pages/EmployerApplications";
 import { AdminDashboard } from "./pages/AdminDashboard";
+import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
+import { EmployerProfilePage } from "./pages/EmployerProfile";
 import { SeekerApplicationsPage } from "./pages/SeekerApplications";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { ThemeMenu } from "./components/ThemeMenu";
 import { motion, AnimatePresence } from "motion/react";
-import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList } from "lucide-react";
+import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2 } from "lucide-react";
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -23,12 +26,24 @@ export default function App() {
   useEffect(() => {
     const fetchProfile = async (userId: string) => {
       const { data, error } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', userId)
+        .from("profiles")
+        .select("role, is_active")
+        .eq("id", userId)
         .single();
-      
+
       if (!error && data) {
+        if (data.is_active === false) {
+          await supabase.auth.signOut();
+          setUser(null);
+          setUserRole(null);
+          setToast({
+            message:
+              "Your account has been deactivated. Contact support if you need access restored.",
+            type: "error",
+          });
+          setTimeout(() => setToast(null), 6000);
+          return;
+        }
         setUserRole(data.role);
       }
     };
@@ -44,7 +59,9 @@ export default function App() {
       setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       const currentUser = session?.user ?? null;
       setUser(currentUser);
       if (currentUser) {
@@ -63,14 +80,14 @@ export default function App() {
   };
 
   if (loading) return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
+    <div className="min-h-screen bg-zinc-100 dark:bg-black flex items-center justify-center">
       <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
     </div>
   );
 
   return (
     <Router>
-      <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-emerald-500/30">
+      <div className="min-h-screen bg-zinc-200 text-zinc-900 dark:bg-[#0a0a0a] dark:text-white font-sans selection:bg-emerald-500/30 transition-colors">
         <AnimatePresence>
           {toast && (
             <motion.div
@@ -90,21 +107,33 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <nav className="border-b border-white/5 bg-black/50 backdrop-blur-xl sticky top-0 z-40">
-          <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-            <Link to="/" className="flex items-center gap-2 font-bold text-2xl tracking-tighter">
+        <nav className="sticky top-0 z-40 border-b border-zinc-200/80 bg-white/85 backdrop-blur-xl dark:border-white/5 dark:bg-black/50">
+          <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between gap-4">
+            <Link
+              to="/"
+              className="flex items-center gap-2 font-bold text-2xl tracking-tighter text-zinc-900 dark:text-white"
+            >
               <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center text-black">
                 <Briefcase className="w-5 h-5" />
               </div>
-              <span>Job<span className="text-emerald-500">Token</span></span>
+              <span>
+                Job<span className="text-emerald-600 dark:text-emerald-500">Token</span>
+              </span>
             </Link>
 
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 sm:gap-4">
+              <ThemeMenu />
               {user ? (
                 <div className="flex items-center gap-6">
-                  <Link 
-                    to={userRole === 'employer' ? "/dashboard/employer" : userRole === 'admin' ? "/admin" : "/dashboard"} 
-                    className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
+                  <Link
+                    to={
+                      userRole === "employer"
+                        ? "/dashboard/employer"
+                        : userRole === "admin"
+                          ? "/admin"
+                          : "/dashboard"
+                    }
+                    className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
                   >
                     <LayoutDashboard className="w-4 h-4" />
                     {userRole === 'employer' ? "Employer Portal" : userRole === 'admin' ? "Admin Portal" : "Dashboard"}
@@ -113,39 +142,50 @@ export default function App() {
                     <>
                       <Link
                         to="/dashboard/applications"
-                        className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
                       >
                         <ClipboardList className="w-4 h-4" />
                         My applications
                       </Link>
                       <Link
                         to="/dashboard/profile"
-                        className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
                       >
                         <UserCircle className="w-4 h-4" />
                         My profile
                       </Link>
                     </>
                   )}
-                  {userRole === 'employer' && (
-                    <Link 
-                      to="/dashboard/employer/applications" 
-                      className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
-                    >
-                      <Users className="w-4 h-4" />
-                      Applications
-                    </Link>
+                  {userRole === "employer" && (
+                    <>
+                      <Link
+                        to="/dashboard/employer/profile"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <Building2 className="w-4 h-4" />
+                        Company profile
+                      </Link>
+                      <Link
+                        to="/dashboard/employer/applications"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <Users className="w-4 h-4" />
+                        Applications
+                      </Link>
+                    </>
                   )}
                   <div className="flex items-center gap-4">
                     <div className="hidden md:flex flex-col items-end">
-                      <span className="text-sm font-medium text-white">{user.email}</span>
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-500">
+                      <span className="text-sm font-medium text-zinc-800 dark:text-white">
+                        {user.email}
+                      </span>
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 dark:text-emerald-500">
                         {userRole === 'employer' ? 'Employer' : userRole === 'admin' ? 'Administrator' : 'Job Seeker'}
                       </span>
                     </div>
-                    <button 
+                    <button
                       onClick={() => supabase.auth.signOut()}
-                      className="p-2 rounded-full hover:bg-white/5 text-zinc-400 hover:text-white transition-colors"
+                      className="p-2 rounded-full text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white transition-colors"
                     >
                       <LogOut className="w-5 h-5" />
                     </button>
@@ -153,16 +193,16 @@ export default function App() {
                 </div>
               ) : (
                 <div className="flex items-center gap-3">
-                  <Link 
+                  <Link
                     to="/login"
-                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium hover:bg-white/5 transition-colors"
+                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium text-zinc-700 hover:bg-zinc-200/80 dark:text-zinc-300 dark:hover:bg-white/5 transition-colors"
                   >
                     <LogIn className="w-4 h-4" />
                     Sign In
                   </Link>
-                  <Link 
+                  <Link
                     to="/signup"
-                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-white text-black hover:bg-emerald-400 transition-colors"
+                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500 dark:bg-white dark:text-black dark:hover:bg-emerald-400 transition-colors"
                   >
                     <UserPlus className="w-4 h-4" />
                     Sign Up
@@ -173,6 +213,7 @@ export default function App() {
           </div>
         </nav>
 
+        <div className="dark:mx-0 dark:mb-0 dark:rounded-none dark:border-transparent dark:shadow-none mx-3 sm:mx-6 mb-6 mt-0 min-h-[calc(100vh-5rem)] rounded-2xl border border-zinc-300/70 bg-[#0a0a0a] text-white shadow-lg dark:shadow-none overflow-hidden">
         <Routes>
           <Route path="/" element={<HomePage user={user} showToast={showToast} />} />
           <Route path="/login" element={<LoginPage />} />
@@ -254,13 +295,38 @@ export default function App() {
               </ProtectedRoute>
             } 
           />
-          <Route 
-            path="/dashboard/employer/applications" 
+          <Route
+            path="/dashboard/employer/applications"
             element={
               <ProtectedRoute user={user} loading={loading}>
                 <EmployerApplicationsPage user={user} showToast={showToast} />
               </ProtectedRoute>
-            } 
+            }
+          />
+          <Route
+            path="/dashboard/employer/profile"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "employer" ? (
+                  <EmployerProfilePage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <Building2 className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Employer profile only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Company details are for employer accounts. Sign in as an employer or open your
+                      job seeker dashboard.
+                    </p>
+                    <Link
+                      to={userRole === "seeker" ? "/dashboard" : "/"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      {userRole === "seeker" ? "Seeker dashboard" : "Home"}
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
           />
           <Route 
             path="/admin" 
@@ -278,7 +344,24 @@ export default function App() {
               </ProtectedRoute>
             } 
           />
+          <Route
+            path="/admin/users"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminUsersPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
         </Routes>
+        </div>
       </div>
     </Router>
   );

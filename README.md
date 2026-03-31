@@ -69,9 +69,9 @@ The wallet UI shows a dev-only simulate button that calls `POST /api/topup`.
 ## Employer revenue controls
 
 - `EMPLOYER_POSTING_FEE_TOKENS` — tokens deducted from the employer’s **wallet** when posting (default `0`).
-- `FEATURE_JOB_TOKENS` — extra tokens when “Featured listing” is checked (default `2`).
-
-Employers need a `wallets` row with enough balance (e.g. after admin grant or future employer top-up flow).
+- **Featured listing cost** — set in the **Admin** portal (stored in `platform_settings`). `FEATURE_JOB_TOKENS` in `.env` is only a fallback if that row is missing.
+- Employers use the **same** `wallets` row as seekers: M-Pesa top-up from the employer dashboard wallet card, **30-day expiry** from the last successful top-up (same as `process-stk-callback`). Posting and featuring check balance and expiry before deducting.
+- Turning **Featured** on when **editing** a job that was not featured charges the current featured price once; saving again while already featured does not re-charge.
 
 ## Deployment (Vercel)
 

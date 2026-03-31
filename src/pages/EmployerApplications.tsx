@@ -1,4 +1,5 @@
 import React, { useState, useEffect, Fragment } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -8,8 +9,9 @@ import {
   Briefcase,
   ChevronDown,
   ChevronUp,
-  IdCard,
   GitBranch,
+  LayoutDashboard,
+  UserCircle,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ApplicationThread } from "../components/ApplicationThread";
@@ -17,6 +19,11 @@ import {
   APPLICATION_STATUSES,
   applicationStatusLabel,
 } from "../lib/applicationStatus";
+import { areasFocusMatch } from "../lib/businessAreas";
+import {
+  SeekerFullProfileModal,
+  seekerProfileFromApplication,
+} from "../components/SeekerFullProfileModal";
 
 interface Application {
   id: string;
@@ -32,38 +39,8 @@ interface Application {
   applicant_experience?: string | null;
   applicant_skills?: string | null;
   applicant_linkedin?: string | null;
-}
-
-function ApplicantProfileDetails({ app }: { app: Application }) {
-  const rows: { label: string; value: string }[] = [];
-  if (app.applicant_phone) rows.push({ label: "Phone", value: app.applicant_phone });
-  if (app.applicant_location) rows.push({ label: "Location", value: app.applicant_location });
-  if (app.applicant_education) rows.push({ label: "Education", value: app.applicant_education });
-  if (app.applicant_experience) rows.push({ label: "Experience", value: app.applicant_experience });
-  if (app.applicant_skills) rows.push({ label: "Skills", value: app.applicant_skills });
-  if (app.applicant_linkedin) rows.push({ label: "LinkedIn", value: app.applicant_linkedin });
-
-  if (rows.length === 0) {
-    return (
-      <p className="text-sm text-zinc-500 italic">
-        This candidate has not filled in their extended profile yet. Encourage them to complete{" "}
-        <strong className="text-zinc-400">My profile</strong> on their dashboard.
-      </p>
-    );
-  }
-
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 text-sm">
-      {rows.map((row) => (
-        <div key={row.label} className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1">
-            {row.label}
-          </p>
-          <p className="text-zinc-200 whitespace-pre-wrap">{row.value}</p>
-        </div>
-      ))}
-    </div>
-  );
+  applicant_profession_or_study?: string | null;
+  job_area_of_business?: string | null;
 }
 
 function employerStatusPillClass(status: string) {
@@ -89,7 +66,7 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [profileExpandedId, setProfileExpandedId] = useState<string | null>(null);
+  const [fullProfileApp, setFullProfileApp] = useState<Application | null>(null);
   const [stageModalApp, setStageModalApp] = useState<Application | null>(null);
   const [stageChoice, setStageChoice] = useState<string>("pending");
   const [stageNotes, setStageNotes] = useState("");
@@ -112,7 +89,8 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
           created_at,
           jobs!inner (
             title,
-            posted_by
+            posted_by,
+            area_of_business
           ),
           profiles:user_id (
             full_name,
@@ -122,7 +100,8 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
             education,
             experience,
             skills,
-            linkedin_url
+            linkedin_url,
+            profession_or_study
           )
         `)
         .eq("jobs.posted_by", user.id)
@@ -136,6 +115,7 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
         notes: app.notes || "",
         created_at: app.created_at,
         job_title: app.jobs.title,
+        job_area_of_business: app.jobs.area_of_business ?? null,
         applicant_name: app.profiles.full_name,
         applicant_email: app.profiles.email,
         applicant_phone: app.profiles.phone,
@@ -144,6 +124,7 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
         applicant_experience: app.profiles.experience,
         applicant_skills: app.profiles.skills,
         applicant_linkedin: app.profiles.linkedin_url,
+        applicant_profession_or_study: app.profiles.profession_or_study ?? null,
       }));
 
       setApplications(formatted);
@@ -200,9 +181,20 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
 
   return (
     <main className="max-w-7xl mx-auto px-6 py-12">
-      <div className="mb-12">
-        <h1 className="text-3xl font-bold tracking-tight">Manage Applications</h1>
-        <p className="text-zinc-500 mt-1">Review and respond to candidates who applied for your jobs.</p>
+      <div className="mb-12 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Manage Applications</h1>
+          <p className="text-zinc-500 mt-1">
+            Review and respond to candidates who applied for your jobs.
+          </p>
+        </div>
+        <Link
+          to="/dashboard/employer"
+          className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 transition-all shrink-0"
+        >
+          <LayoutDashboard className="w-5 h-5" />
+          Employer dashboard
+        </Link>
       </div>
 
       {applications.length > 0 ? (
@@ -214,7 +206,9 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Job Position</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Status</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Applied On</th>
-                <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Profile</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">
+                  Full profile
+                </th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Messages</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right">Actions</th>
               </tr>
@@ -229,7 +223,17 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                         <User className="w-5 h-5" />
                       </div>
                       <div>
-                        <p className="font-bold text-white">{app.applicant_name}</p>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-bold text-white">{app.applicant_name}</p>
+                          {areasFocusMatch(
+                            app.applicant_profession_or_study,
+                            app.job_area_of_business
+                          ) ? (
+                            <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+                              Focus match
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="text-xs text-zinc-500 flex items-center gap-1">
                           <Mail className="w-3 h-3" />
                           {app.applicant_email}
@@ -259,17 +263,12 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                   <td className="px-6 py-4">
                     <button
                       type="button"
-                      onClick={() =>
-                        setProfileExpandedId((id) => (id === app.id ? null : app.id))
-                      }
-                      className="p-2 rounded-lg border border-white/10 text-zinc-400 hover:text-white"
-                      title="Applicant profile"
+                      onClick={() => setFullProfileApp(app)}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/30 text-xs font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                      title="View seeker full profile"
                     >
-                      {profileExpandedId === app.id ? (
-                        <ChevronUp className="w-4 h-4" />
-                      ) : (
-                        <IdCard className="w-4 h-4" />
-                      )}
+                      <UserCircle className="w-4 h-4" />
+                      View profile
                     </button>
                   </td>
                   <td className="px-6 py-4">
@@ -304,16 +303,6 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                     </button>
                   </td>
                 </tr>
-                {profileExpandedId === app.id && (
-                  <tr className="border-b border-white/5 bg-zinc-950/80">
-                    <td colSpan={7} className="px-6 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3">
-                        Applicant profile
-                      </p>
-                      <ApplicantProfileDetails app={app} />
-                    </td>
-                  </tr>
-                )}
                 {expandedId === app.id && (
                   <tr className="border-b border-white/5 bg-black/20">
                     <td colSpan={7} className="px-6 py-4">
@@ -333,6 +322,12 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
           <p className="text-zinc-500 mt-2">When candidates apply for your jobs, they will appear here.</p>
         </div>
       )}
+
+      <SeekerFullProfileModal
+        open={!!fullProfileApp}
+        onClose={() => setFullProfileApp(null)}
+        profile={fullProfileApp ? seekerProfileFromApplication(fullProfileApp) : null}
+      />
 
       <AnimatePresence>
         {stageModalApp && (
@@ -360,7 +355,7 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
               <select
                 value={stageChoice}
                 onChange={(e) => setStageChoice(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white mb-4 focus:outline-none focus:border-emerald-500"
+                className="select-themed mb-4"
               >
                 {APPLICATION_STATUSES.map((s) => (
                   <option key={s} value={s}>

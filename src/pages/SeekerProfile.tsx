@@ -13,7 +13,9 @@ import {
   Loader2,
   ArrowLeft,
   Save,
+  BookOpen,
 } from "lucide-react";
+import { BUSINESS_AREAS } from "../lib/businessAreas";
 
 type ProfileRow = {
   id: string;
@@ -25,6 +27,7 @@ type ProfileRow = {
   experience: string | null;
   skills: string | null;
   linkedin_url: string | null;
+  profession_or_study: string | null;
 };
 
 export function SeekerProfilePage({
@@ -44,6 +47,7 @@ export function SeekerProfilePage({
     experience: "",
     skills: "",
     linkedin_url: "",
+    profession_or_study: "",
   });
 
   useEffect(() => {
@@ -54,7 +58,7 @@ export function SeekerProfilePage({
       const { data, error } = await supabase
         .from("profiles")
         .select(
-          "id, full_name, email, phone, location, education, experience, skills, linkedin_url"
+          "id, full_name, email, phone, location, education, experience, skills, linkedin_url, profession_or_study"
         )
         .eq("id", user.id)
         .single();
@@ -75,6 +79,7 @@ export function SeekerProfilePage({
         experience: p.experience || "",
         skills: p.skills || "",
         linkedin_url: p.linkedin_url || "",
+        profession_or_study: p.profession_or_study || "",
       });
       setLoading(false);
     };
@@ -98,6 +103,7 @@ export function SeekerProfilePage({
           experience: form.experience.trim() || null,
           skills: form.skills.trim() || null,
           linkedin_url: form.linkedin_url.trim() || null,
+          profession_or_study: form.profession_or_study.trim() || null,
         })
         .eq("id", user.id);
 
@@ -140,8 +146,8 @@ export function SeekerProfilePage({
           <div>
             <h1 className="text-2xl font-bold">Your profile</h1>
             <p className="text-sm text-zinc-500 mt-0.5">
-              Information employers see alongside your applications. Keep it accurate and
-              professional.
+              Information employers see alongside your applications. Your profession or area of
+              study is used to alert you when new jobs match your field.
             </p>
           </div>
         </div>
@@ -166,6 +172,30 @@ export function SeekerProfilePage({
               className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
               placeholder="Name as it should appear to employers"
             />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-zinc-400 ml-1 flex items-center gap-2">
+              <BookOpen className="w-4 h-4" />
+              Profession or area of study
+            </label>
+            <select
+              value={form.profession_or_study}
+              onChange={(e) => setForm((f) => ({ ...f, profession_or_study: e.target.value }))}
+              className="select-themed"
+            >
+              <option value="">Select your field (optional)</option>
+              {BUSINESS_AREAS.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-zinc-500">
+              Same categories as employer <span className="text-zinc-400">area of business</span>{" "}
+              and job <span className="text-zinc-400">role focus</span>. When they match, you can get
+              email and in-app alerts for new listings.
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">

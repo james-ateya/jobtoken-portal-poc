@@ -33,6 +33,21 @@ export function LoginPage() {
         }
         setLoading(false);
       } else {
+        const { data: sess } = await supabase.auth.getSession();
+        const uid = sess.session?.user?.id;
+        if (uid) {
+          const { data: prof } = await supabase
+            .from("profiles")
+            .select("is_active")
+            .eq("id", uid)
+            .maybeSingle();
+          if (prof && prof.is_active === false) {
+            await supabase.auth.signOut();
+            setError("This account has been deactivated. Contact support if you believe this is a mistake.");
+            setLoading(false);
+            return;
+          }
+        }
         navigate("/");
       }
     } catch (err: any) {

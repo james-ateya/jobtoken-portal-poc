@@ -16,7 +16,13 @@ import {
   CalendarClock,
 } from "lucide-react";
 import { ApplicationThread } from "../components/ApplicationThread";
+import {
+  SeekerFullProfileModal,
+  seekerProfileFromApplicantCard,
+} from "../components/SeekerFullProfileModal";
 import { cn } from "../lib/utils";
+import { BUSINESS_AREAS, areasFocusMatch } from "../lib/businessAreas";
+import { WalletDashboard } from "../components/WalletDashboard";
 
 interface Job {
   id: string;
@@ -28,6 +34,7 @@ interface Job {
   applications_count?: number;
   is_featured?: boolean;
   closes_at?: string | null;
+  area_of_business?: string | null;
 }
 
 function jobListingExpired(job: Job) {
@@ -46,6 +53,7 @@ interface Applicant {
   experience?: string | null;
   skills?: string | null;
   linkedin_url?: string | null;
+  profession_or_study?: string | null;
 }
 
 export function EmployerDashboard({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
@@ -65,11 +73,16 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     token_cost: 1,
     is_featured: false,
     closes_at: "",
+    area_of_business: "",
   });
   const [posting, setPosting] = useState(false);
   const [employerTokens, setEmployerTokens] = useState<number | null>(null);
+  const [employerExpiresAt, setEmployerExpiresAt] = useState<string | null>(null);
+  const [featureJobTokens, setFeatureJobTokens] = useState<number>(2);
+  const [pricingLoaded, setPricingLoaded] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
+  const [fullProfileApplicant, setFullProfileApplicant] = useState<Applicant | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -79,14 +92,25 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     }
   }, [user]);
 
+  useEffect(() => {
+    fetch("/api/employer/pricing")
+      .then((r) => r.json())
+      .then((d) => {
+        if (typeof d.featureJobTokens === "number") setFeatureJobTokens(d.featureJobTokens);
+      })
+      .catch(() => {})
+      .finally(() => setPricingLoaded(true));
+  }, []);
+
   const fetchEmployerWallet = async () => {
     if (!user?.id) return;
     const { data } = await supabase
       .from("wallets")
-      .select("token_balance")
+      .select("token_balance, expires_at")
       .eq("user_id", user.id)
       .maybeSingle();
     setEmployerTokens(data?.token_balance ?? 0);
+    setEmployerExpiresAt(data?.expires_at ?? null);
   };
 
   const fetchNotifications = async () => {
@@ -120,10 +144,21 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
       // Fetch jobs and count applications for each
       const { data, error } = await supabase
         .from("jobs")
-        .select(`
-          *,
+        .select(
+          `
+          id,
+          title,
+          description,
+          job_type,
+          token_cost,
+          posted_by,
+          is_featured,
+          closes_at,
+          area_of_business,
+          created_at,
           applications:applications(count)
-        `)
+        `
+        )
         .eq("posted_by", user.id)
         .order("created_at", { ascending: false });
 
@@ -159,7 +194,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             education,
             experience,
             skills,
-            linkedin_url
+            linkedin_url,
+            profession_or_study
           )
         `)
         .eq("job_id", jobId);
@@ -178,6 +214,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
         experience: item.profiles.experience,
         skills: item.profiles.skills,
         linkedin_url: item.profiles.linkedin_url,
+        profession_or_study: item.profiles.profession_or_study,
       }));
       
       setApplicants(formattedApplicants);
@@ -204,6 +241,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
       token_cost: 1,
       is_featured: false,
       closes_at: "",
+      area_of_business: "",
     });
     setJobFormOpen(true);
   };
@@ -221,6 +259,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
       token_cost: job.token_cost,
       is_featured: !!job.is_featured,
       closes_at: ca,
+      area_of_business: job.area_of_business || "",
     });
     setJobFormOpen(true);
   };
@@ -230,6 +269,14 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
 
     if (!jobForm.job_type) {
       showToast("Please select a job type", "error");
+      return;
+    }
+
+    if (!jobForm.area_of_business?.trim()) {
+      showToast(
+        "Select the profession or field sought for this role (e.g. Finance). It can differ from your company sector in Company profile.",
+        "error"
+      );
       return;
     }
 
@@ -247,6 +294,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             token_cost: jobForm.token_cost,
             is_featured: jobForm.is_featured,
             closes_at: jobForm.closes_at || null,
+            area_of_business: jobForm.area_of_business.trim(),
+            profession_sought: jobForm.area_of_business.trim(),
           }),
         });
 
@@ -268,6 +317,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             token_cost: jobForm.token_cost,
             is_featured: jobForm.is_featured,
             closes_at: jobForm.closes_at || null,
+            area_of_business: jobForm.area_of_business.trim(),
+            profession_sought: jobForm.area_of_business.trim(),
           }),
         });
 
@@ -305,13 +356,6 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Employer Portal</h1>
           <p className="text-zinc-500 mt-1">Manage your job listings and track applicants.</p>
-          {employerTokens !== null && (
-            <p className="text-xs text-zinc-400 mt-2">
-              Employer wallet:{" "}
-              <span className="text-emerald-400 font-bold">{employerTokens}</span> tokens
-              (used for posting &amp; featured listings)
-            </p>
-          )}
         </div>
         {!selectedJob && !jobFormOpen && (
           <div className="flex flex-wrap items-center gap-3">
@@ -346,7 +390,11 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                           !n.read_at ? "bg-emerald-500/10" : "bg-white/5"
                         )}
                       >
-                        <p className="text-xs font-bold text-emerald-400">{n.type}</p>
+                        <p className="text-xs font-bold text-emerald-400">
+                          {n.type === "new_application"
+                            ? "New application"
+                            : String(n.type).replace(/_/g, " ")}
+                        </p>
                         <p className="text-sm text-zinc-200 mt-1">
                           {(n.payload as any)?.seeker_name || "Applicant"} —{" "}
                           {(n.payload as any)?.job_title || "Job"}
@@ -360,6 +408,12 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                 </div>
               )}
             </div>
+            <Link
+              to="/dashboard/employer/profile"
+              className="flex items-center justify-center gap-2 px-5 py-3 bg-white/5 text-white border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all active:scale-[0.98] text-sm"
+            >
+              Company profile
+            </Link>
             <Link
               to="/dashboard/employer/applications"
               className="flex items-center justify-center gap-2 px-6 py-3 bg-white/5 text-white border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all active:scale-[0.98]"
@@ -379,6 +433,23 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
         )}
       </div>
 
+      <div
+        className={cn(
+          !selectedJob && "grid grid-cols-1 lg:grid-cols-12 gap-8 items-start"
+        )}
+      >
+        {!selectedJob && user?.id ? (
+          <div className="lg:col-span-4 order-2 lg:order-none">
+            <WalletDashboard
+              balance={employerTokens ?? 0}
+              onBalanceRefresh={fetchEmployerWallet}
+              userId={user.id}
+              expiresAt={employerExpiresAt}
+              audience="employer"
+            />
+          </div>
+        ) : null}
+        <div className={cn(!selectedJob && "lg:col-span-8", selectedJob && "w-full")}>
       <AnimatePresence mode="wait">
         {jobFormOpen ? (
           <motion.div
@@ -429,6 +500,40 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                 />
               </div>
 
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-zinc-400 ml-1 flex items-center gap-2">
+                  <Briefcase className="w-4 h-4 text-zinc-500" />
+                  Profession or field sought for this role
+                </label>
+                <select
+                  required
+                  value={jobForm.area_of_business}
+                  onChange={(e) => setJobForm({ ...jobForm, area_of_business: e.target.value })}
+                  className="select-themed"
+                >
+                  <option value="" disabled>
+                    Select profession (e.g. Finance, even if your company is in IT)
+                  </option>
+                  {BUSINESS_AREAS.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500">
+                  This is the <strong className="text-zinc-400">role&apos;s</strong> field, not your
+                  company sector (set that under{" "}
+                  <Link
+                    to="/dashboard/employer/profile"
+                    className="text-emerald-500/90 hover:text-emerald-400"
+                  >
+                    Company profile
+                  </Link>
+                  ). Seekers with the same profession on their profile get alerts; they can filter jobs
+                  by this value.
+                </p>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-zinc-400 ml-1">Job Type</label>
@@ -436,7 +541,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     required
                     value={jobForm.job_type}
                     onChange={(e) => setJobForm({ ...jobForm, job_type: e.target.value })}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors appearance-none"
+                    className="select-themed"
                   >
                     <option value="" disabled>
                       Select Type
@@ -492,8 +597,13 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     Featured listing
                   </span>
                   <p className="text-xs text-zinc-500 mt-1">
-                    Higher visibility on the job board. Extra tokens apply when posting a new job (
-                    <code className="text-zinc-400">FEATURE_JOB_TOKENS</code>).
+                    Higher visibility on the job board. When you turn this on for a new job or upgrade
+                    an existing listing, we deduct{" "}
+                    <span className="text-zinc-300 font-medium">
+                      {pricingLoaded ? featureJobTokens : "…"}
+                    </span>{" "}
+                    token{featureJobTokens === 1 ? "" : "s"} from your employer wallet (if that cost
+                    is greater than zero). Already-featured jobs are not charged again on save.
                   </p>
                 </div>
               </label>
@@ -521,8 +631,12 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
           >
             <div className="mb-8 flex items-center justify-between">
               <div className="flex items-center gap-4">
-                <button 
-                  onClick={() => setSelectedJob(null)}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFullProfileApplicant(null);
+                    setSelectedJob(null);
+                  }}
                   className="p-2 rounded-full hover:bg-white/5 text-zinc-400 transition-colors"
                 >
                   <ArrowLeft className="w-6 h-6" />
@@ -549,8 +663,25 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     <div className="w-12 h-12 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-4">
                       <Users className="w-6 h-6" />
                     </div>
-                    <h3 className="text-lg font-bold text-white mb-1">{applicant.full_name}</h3>
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                      <h3 className="text-lg font-bold text-white">{applicant.full_name}</h3>
+                      {selectedJob &&
+                      areasFocusMatch(
+                        applicant.profession_or_study,
+                        selectedJob.area_of_business
+                      ) ? (
+                        <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 shrink-0">
+                          Focus match
+                        </span>
+                      ) : null}
+                    </div>
                     <p className="text-zinc-400 text-sm mb-2">{applicant.email}</p>
+                    {applicant.profession_or_study ? (
+                      <p className="text-[11px] text-zinc-500 mb-2">
+                        Field:{" "}
+                        <span className="text-zinc-300">{applicant.profession_or_study}</span>
+                      </p>
+                    ) : null}
                     {(applicant.phone || applicant.location) && (
                       <p className="text-xs text-zinc-500 mb-2">
                         {[applicant.phone, applicant.location].filter(Boolean).join(" · ")}
@@ -564,6 +695,13 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     {applicant.skills && (
                       <p className="text-[11px] text-emerald-500/90 mb-3 line-clamp-2">{applicant.skills}</p>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setFullProfileApplicant(applicant)}
+                      className="w-full mb-3 py-2.5 rounded-xl border border-emerald-500/35 text-xs font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                    >
+                      View full profile
+                    </button>
                     <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
                       <span>Applied on</span>
                       <span>{new Date(applicant.created_at).toLocaleDateString()}</span>
@@ -582,6 +720,16 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                 <p className="text-zinc-500 mt-2">Check back later as users discover your job post.</p>
               </div>
             )}
+
+            <SeekerFullProfileModal
+              open={!!fullProfileApplicant && !!selectedJob}
+              onClose={() => setFullProfileApplicant(null)}
+              profile={
+                fullProfileApplicant && selectedJob
+                  ? seekerProfileFromApplicantCard(fullProfileApplicant, selectedJob)
+                  : null
+              }
+            />
           </motion.div>
         ) : (
           <motion.div
@@ -618,8 +766,22 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                         ) : null}
                       </div>
                       <div className="flex flex-col items-end gap-2 shrink-0">
-                        <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
-                          {job.job_type}
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+                            {job.job_type}
+                          </div>
+                          {job.area_of_business ? (
+                            <span
+                              className="text-[9px] font-medium text-emerald-400/90 max-w-[10rem] text-right leading-tight"
+                              title="Profession sought for this role"
+                            >
+                              {job.area_of_business}
+                            </span>
+                          ) : (
+                            <span className="text-[9px] text-amber-400/90 max-w-[9rem] text-right leading-tight">
+                              Add profession
+                            </span>
+                          )}
                         </div>
                         <button
                           type="button"
@@ -663,6 +825,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
           </motion.div>
         )}
       </AnimatePresence>
+        </div>
+      </div>
     </main>
   );
 }

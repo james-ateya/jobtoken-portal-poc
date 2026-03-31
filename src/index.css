@@ -1,1 +1,29 @@
 @import "tailwindcss";
+
+/* Class-based dark mode for Tailwind `dark:` utilities */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  html:not(.dark) {
+    color-scheme: light;
+  }
+}
+
+@layer components {
+  /* Native <select> + options: readable on Windows/Chrome in dark surfaces */
+  .select-themed {
+    color-scheme: dark;
+    @apply w-full rounded-xl border border-white/15 bg-zinc-900 py-3 px-4 text-sm text-zinc-100;
+    @apply shadow-[inset_0_1px_2px_rgba(0,0,0,0.35)] transition-colors;
+    @apply focus:border-emerald-500/60 focus:outline-none focus:ring-2 focus:ring-emerald-500/25;
+  }
+  .select-themed option {
+    @apply bg-zinc-900 text-zinc-100;
+  }
+}

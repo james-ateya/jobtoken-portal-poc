@@ -29,6 +29,8 @@ interface WalletDashboardProps {
   onBalanceRefresh?: () => void;
   userId: string;
   expiresAt?: string | null;
+  /** Seeker copy vs employer (posting / featured fees). */
+  audience?: "seeker" | "employer";
 }
 
 export function WalletDashboard({
@@ -36,6 +38,7 @@ export function WalletDashboard({
   onBalanceRefresh,
   userId,
   expiresAt,
+  audience = "seeker",
 }: WalletDashboardProps) {
   const [activeTab, setActiveTab] = useState<"wallet" | "history">("wallet");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -314,8 +317,12 @@ export function WalletDashboard({
                     )}
                   >
                     {isExpired
-                      ? "Your tokens expired. Top up to apply again."
-                      : "Buy a token pack with M-Pesa to start applying."}
+                      ? audience === "employer"
+                        ? "Your tokens expired. Top up to post jobs and use featured listings again."
+                        : "Your tokens expired. Top up to apply again."
+                      : audience === "employer"
+                        ? "Buy a token pack with M-Pesa for posting fees and featured listings (same expiry rules as seeker wallets)."
+                        : "Buy a token pack with M-Pesa to start applying."}
                   </p>
                 </div>
               )}

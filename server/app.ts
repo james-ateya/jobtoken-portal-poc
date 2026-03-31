@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { loadProjectEnv } from "./load-env.js";
 import { sendMail } from "./mail.js";
 import {
+  getKesPerToken,
   getTokenPacks,
   getTopupKesBounds,
   initiateStkPush,
@@ -49,10 +50,66 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ""
 );
 
+/** Job listing profession (DB column jobs.area_of_business). Accept either key from the client. */
+function readJobProfessionField(body: Record<string, unknown>): string | null {
+  const raw = body.area_of_business ?? body.profession_sought;
+  if (raw === undefined || raw === null) return null;
+  const s = typeof raw === "string" ? raw : String(raw);
+  const t = s.trim();
+  return t.length > 0 ? t : null;
+}
+
+/**
+ * Vercel / some proxies may leave req.body as a string or Buffer; express.json() usually parses JSON.
+ */
+function asNonEmptyString(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+}
+
+function parseJsonBody(req: { body?: unknown }): Record<string, unknown> {
+  const b = req.body;
+  if (Buffer.isBuffer(b)) {
+    try {
+      return JSON.parse(b.toString("utf8")) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (typeof b === "string") {
+    try {
+      return JSON.parse(b) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (b != null && typeof b === "object" && !Array.isArray(b)) {
+    return b as Record<string, unknown>;
+  }
+  return {};
+}
+
+function walletTokensNotExpired(expiresAt: string | null | undefined): boolean {
+  if (expiresAt == null || expiresAt === "") return true;
+  return new Date(expiresAt).getTime() >= Date.now();
+}
+
+async function getFeatureJobTokens(): Promise<number> {
+  const { data } = await supabaseAdmin
+    .from("platform_settings")
+    .select("value_int")
+    .eq("key", "feature_job_tokens")
+    .maybeSingle();
+  const n = data?.value_int;
+  if (typeof n === "number" && Number.isFinite(n) && n >= 0) return Math.floor(n);
+  return Math.max(0, parseInt(process.env.FEATURE_JOB_TOKENS || "2", 10) || 0);
+}
+
 async function ensureWallet(userId: string) {
   let { data: wallet, error: walletError } = await supabaseAdmin
     .from("wallets")
-    .select("id, token_balance")
+    .select("id, token_balance, expires_at")
     .eq("user_id", userId)
     .single();
 
@@ -145,6 +202,20 @@ app.get("/api/token-packs", (_req, res) => {
     minTopupKes: bounds.min,
     maxTopupKes: bounds.max,
   });
+});
+
+/** Public pricing hints for employer UI (featured listing cost from admin settings). */
+app.get("/api/employer/pricing", async (_req, res) => {
+  try {
+    const featureJobTokens = await getFeatureJobTokens();
+    const postingFeeTokens = Math.max(
+      0,
+      parseInt(process.env.EMPLOYER_POSTING_FEE_TOKENS || "0", 10) || 0
+    );
+    res.json({ featureJobTokens, postingFeeTokens });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // --- Simulated top-up (dev / fallback) ---
@@ -597,21 +668,104 @@ app.post("/api/applications/update-status", async (req, res) => {
   }
 });
 
+/** Matches seekers' profiles.profession_or_study to this job's profession/field (jobs.area_of_business). */
+async function notifySeekersJobProfessionMatch(opts: {
+  jobId: string;
+  jobTitle: string;
+  professionSought: string | null | undefined;
+}) {
+  const profession = String(opts.professionSought ?? "").trim();
+  if (!profession) return;
+
+  const target = profession.toLowerCase();
+  const appUrl = process.env.APP_URL || "http://localhost:3000";
+
+  const { data: seekers, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, email, full_name, profession_or_study")
+    .eq("role", "seeker");
+
+  if (error || !seekers?.length) return;
+
+  const matched = seekers.filter(
+    (s) =>
+      s.profession_or_study &&
+      String(s.profession_or_study).trim().toLowerCase() === target
+  );
+
+  for (const seeker of matched) {
+    const { data: existing } = await supabaseAdmin
+      .from("notifications")
+      .select("id")
+      .eq("user_id", seeker.id)
+      .eq("type", "job_match")
+      .contains("payload", { job_id: opts.jobId })
+      .maybeSingle();
+
+    if (existing) continue;
+
+    await supabaseAdmin.from("notifications").insert({
+      user_id: seeker.id,
+      type: "job_match",
+      payload: {
+        job_id: opts.jobId,
+        job_title: opts.jobTitle,
+        profession_sought: profession,
+        area_of_business: profession,
+      },
+    });
+
+    let toEmail = seeker.email;
+    if (!toEmail) {
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(seeker.id);
+      toEmail = authUser.user?.email || null;
+    }
+
+    if (toEmail) {
+      await sendMail({
+        to: toEmail,
+        subject: `New job in your field: ${opts.jobTitle}`,
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+            <h2 style="color: #10b981;">A job matches your profile</h2>
+            <p>Hi ${escapeHtml(seeker.full_name || "there")},</p>
+            <p>A new listing <strong>${escapeHtml(opts.jobTitle)}</strong> is seeking someone in <strong>${escapeHtml(profession)}</strong>, which matches the profession or area of study on your JobToken profile.</p>
+            <p><a href="${appUrl}/" style="display: inline-block; background: #10b981; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin: 16px 0;">Browse jobs</a></p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
+            <p style="color: #666; font-size: 12px;">You can update your profile focus anytime under My profile.</p>
+          </div>
+        `,
+      });
+    }
+  }
+}
+
 // --- Employer job posting (fees + featured) ---
 app.post("/api/employer/post-job", async (req, res) => {
-  const { userId, title, description, job_type, token_cost, is_featured, closes_at } = req.body;
+  const body = parseJsonBody(req);
+  const userId = asNonEmptyString(body.userId);
+  const title = asNonEmptyString(body.title);
+  const description = asNonEmptyString(body.description);
+  const job_type = asNonEmptyString(body.job_type);
+  const token_cost = body.token_cost;
+  const is_featured = body.is_featured;
+  const closes_at = body.closes_at;
 
   if (!userId || !title || !description || !job_type) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  const postingFee = parseInt(process.env.EMPLOYER_POSTING_FEE_TOKENS || "0", 10);
-  const featureFee = parseInt(process.env.FEATURE_JOB_TOKENS || "2", 10);
+  const postingFee = Math.max(
+    0,
+    parseInt(process.env.EMPLOYER_POSTING_FEE_TOKENS || "0", 10) || 0
+  );
   const featured = Boolean(is_featured);
-  let totalFee = postingFee;
-  if (featured) totalFee += featureFee;
 
   try {
+    const featureFee = await getFeatureJobTokens();
+    let totalFee = postingFee;
+    if (featured) totalFee += featureFee;
+
     const { data: profile, error: pErr } = await supabaseAdmin
       .from("profiles")
       .select("role")
@@ -622,9 +776,32 @@ app.post("/api/employer/post-job", async (req, res) => {
       return res.status(403).json({ error: "Only employers can post jobs" });
     }
 
+    const closesAt =
+      closes_at && String(closes_at).trim()
+        ? new Date(String(closes_at)).toISOString()
+        : null;
+    if (closesAt && Number.isNaN(Date.parse(closesAt))) {
+      return res.status(400).json({ error: "Invalid closes_at date" });
+    }
+
+    const professionSought = readJobProfessionField(body);
+
+    if (!professionSought) {
+      return res.status(400).json({
+        error:
+          "Profession or field sought is required. Choose the field for this role (e.g. Finance)—it can differ from your company sector in Company profile.",
+      });
+    }
+
     const wallet = await ensureWallet(userId);
 
     if (totalFee > 0) {
+      if (!walletTokensNotExpired(wallet.expires_at)) {
+        return res.status(400).json({
+          error:
+            "Your employer tokens have expired. Top up your wallet (same rules as job seeker tokens) to post or feature listings.",
+        });
+      }
       if (wallet.token_balance < totalFee) {
         return res.status(400).json({
           error: `Insufficient employer tokens. Need ${totalFee} tokens (posting + featured). Top up your wallet as an employer.`,
@@ -649,14 +826,6 @@ app.post("/api/employer/post-job", async (req, res) => {
       if (ti) throw ti;
     }
 
-    const closesAt =
-      closes_at && String(closes_at).trim()
-        ? new Date(String(closes_at)).toISOString()
-        : null;
-    if (closesAt && Number.isNaN(Date.parse(closesAt))) {
-      return res.status(400).json({ error: "Invalid closes_at date" });
-    }
-
     const { data: job, error: insErr } = await supabaseAdmin
       .from("jobs")
       .insert({
@@ -668,12 +837,37 @@ app.post("/api/employer/post-job", async (req, res) => {
         is_featured: featured,
         closes_at: closesAt,
       })
-      .select()
+      .select("id")
       .single();
 
     if (insErr) throw insErr;
 
-    res.json({ success: true, job });
+    const { error: profErr } = await supabaseAdmin
+      .from("jobs")
+      .update({ area_of_business: professionSought })
+      .eq("id", job.id)
+      .eq("posted_by", userId);
+
+    if (profErr) {
+      await supabaseAdmin.from("jobs").delete().eq("id", job.id);
+      throw profErr;
+    }
+
+    const { data: jobFull, error: fetchErr } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("id", job.id)
+      .single();
+
+    if (fetchErr) throw fetchErr;
+
+    await notifySeekersJobProfessionMatch({
+      jobId: jobFull.id,
+      jobTitle: title,
+      professionSought,
+    });
+
+    res.json({ success: true, job: jobFull });
   } catch (error: any) {
     console.error("post-job:", error);
     res.status(500).json({ error: error.message });
@@ -681,8 +875,15 @@ app.post("/api/employer/post-job", async (req, res) => {
 });
 
 app.post("/api/employer/update-job", async (req, res) => {
-  const { userId, jobId, title, description, job_type, token_cost, is_featured, closes_at } =
-    req.body;
+  const body = parseJsonBody(req);
+  const userId = asNonEmptyString(body.userId);
+  const jobId = asNonEmptyString(body.jobId);
+  const title = asNonEmptyString(body.title);
+  const description = asNonEmptyString(body.description);
+  const job_type = asNonEmptyString(body.job_type);
+  const token_cost = body.token_cost;
+  const is_featured = body.is_featured;
+  const closes_at = body.closes_at;
 
   if (!userId || !jobId || !title || !description || !job_type) {
     return res.status(400).json({ error: "Missing required fields" });
@@ -691,7 +892,7 @@ app.post("/api/employer/update-job", async (req, res) => {
   try {
     const { data: existing, error: exErr } = await supabaseAdmin
       .from("jobs")
-      .select("id, posted_by")
+      .select("id, posted_by, is_featured")
       .eq("id", jobId)
       .single();
 
@@ -702,35 +903,97 @@ app.post("/api/employer/update-job", async (req, res) => {
       return res.status(403).json({ error: "You can only edit your own jobs" });
     }
 
-    const updatePayload: Record<string, unknown> = {
-      title,
-      description,
-      job_type,
-      token_cost: Number(token_cost) || 1,
-      is_featured: Boolean(is_featured),
-    };
+    const featured = Boolean(is_featured);
+    const wasFeatured = Boolean((existing as { is_featured?: boolean }).is_featured);
 
+    const professionSought = readJobProfessionField(body);
+    if (!professionSought) {
+      return res.status(400).json({
+        error:
+          "Profession or field sought is required (area_of_business / profession_sought). It must match the value you select when posting or editing.",
+      });
+    }
+
+    let closesAtUpdate: string | null | undefined = undefined;
     if (closes_at !== undefined) {
       if (closes_at === null || closes_at === "") {
-        updatePayload.closes_at = null;
+        closesAtUpdate = null;
       } else {
         const d = new Date(String(closes_at));
         if (Number.isNaN(d.getTime())) {
           return res.status(400).json({ error: "Invalid closes_at date" });
         }
-        updatePayload.closes_at = d.toISOString();
+        closesAtUpdate = d.toISOString();
       }
     }
 
-    const { data: job, error: upErr } = await supabaseAdmin
+    const featureFee = await getFeatureJobTokens();
+
+    if (featured && !wasFeatured && featureFee > 0) {
+      const wallet = await ensureWallet(userId);
+      if (!walletTokensNotExpired(wallet.expires_at)) {
+        return res.status(400).json({
+          error:
+            "Your employer tokens have expired. Top up your wallet to enable a featured listing.",
+        });
+      }
+      if (wallet.token_balance < featureFee) {
+        return res.status(400).json({
+          error: `Insufficient tokens to feature this job. You need ${featureFee} tokens. Top up your employer wallet.`,
+        });
+      }
+      const { error: wu } = await supabaseAdmin
+        .from("wallets")
+        .update({ token_balance: wallet.token_balance - featureFee })
+        .eq("id", wallet.id);
+      if (wu) throw wu;
+      const ref = `FEAT-${jobId.slice(0, 8)}-${Math.random().toString(36).slice(2, 8)}`;
+      const { error: ti } = await supabaseAdmin.from("transactions").insert({
+        wallet_id: wallet.id,
+        tokens_added: -featureFee,
+        type: "employer_feature_fee",
+        reference_id: ref,
+        status: "completed",
+      });
+      if (ti) throw ti;
+    }
+
+    const updatePayload: Record<string, unknown> = {
+      title,
+      description,
+      job_type,
+      token_cost: Number(token_cost) || 1,
+      is_featured: featured,
+      area_of_business: professionSought,
+    };
+
+    if (closesAtUpdate !== undefined) {
+      updatePayload.closes_at = closesAtUpdate;
+    }
+
+    const { error: upErr } = await supabaseAdmin
       .from("jobs")
       .update(updatePayload)
       .eq("id", jobId)
-      .eq("posted_by", userId)
-      .select()
-      .single();
+      .eq("posted_by", userId);
 
     if (upErr) throw upErr;
+
+    const { error: profErr } = await supabaseAdmin
+      .from("jobs")
+      .update({ area_of_business: professionSought })
+      .eq("id", jobId)
+      .eq("posted_by", userId);
+
+    if (profErr) throw profErr;
+
+    const { data: job, error: fetchErr } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("id", jobId)
+      .single();
+
+    if (fetchErr) throw fetchErr;
 
     res.json({ success: true, job });
   } catch (error: any) {
@@ -790,6 +1053,287 @@ app.post("/api/admin/tokens/grant", async (req, res) => {
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/platform-settings", async (_req, res) => {
+  try {
+    const feature_job_tokens = await getFeatureJobTokens();
+    res.json({ feature_job_tokens });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function handleAdminPlatformSettingsWrite(req: express.Request, res: express.Response) {
+  const body = parseJsonBody(req);
+  const raw = body.feature_job_tokens;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw ?? ""), 10);
+  if (!Number.isFinite(n) || n < 0 || n > 1_000_000) {
+    return res.status(400).json({
+      error: "feature_job_tokens must be an integer from 0 to 1000000",
+    });
+  }
+  const value = Math.floor(n);
+  const now = new Date().toISOString();
+  try {
+    const { data: updated, error: upErr } = await supabaseAdmin
+      .from("platform_settings")
+      .update({ value_int: value, updated_at: now })
+      .eq("key", "feature_job_tokens")
+      .select("key");
+
+    if (upErr) throw upErr;
+
+    if (updated && updated.length > 0) {
+      return res.status(200).json({ success: true, feature_job_tokens: value });
+    }
+
+    const { error: insErr } = await supabaseAdmin.from("platform_settings").insert({
+      key: "feature_job_tokens",
+      value_int: value,
+      updated_at: now,
+    });
+    if (insErr) throw insErr;
+    return res.status(200).json({ success: true, feature_job_tokens: value });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || "Save failed" });
+  }
+}
+
+app.put("/api/admin/platform-settings", handleAdminPlatformSettingsWrite);
+app.post("/api/admin/platform-settings", handleAdminPlatformSettingsWrite);
+
+/** Top-ups received, token float, application token “income” (KES estimates use MPESA_KES_PER_TOKEN). */
+app.get("/api/admin/financial-overview", async (_req, res) => {
+  try {
+    const kesPerToken = getKesPerToken();
+
+    const { data: topupRows } = await supabaseAdmin
+      .from("transactions")
+      .select("amount_kes")
+      .eq("type", "topup")
+      .eq("status", "completed");
+
+    const total_customer_topup_kes =
+      topupRows?.reduce((acc, t) => acc + Number(t.amount_kes ?? 0), 0) || 0;
+
+    const { data: walletRows } = await supabaseAdmin.from("wallets").select("token_balance");
+    const total_tokens_outstanding =
+      walletRows?.reduce((acc, w) => acc + (Number(w.token_balance) || 0), 0) || 0;
+
+    const outstanding_tokens_kes_estimate = Math.round(total_tokens_outstanding * kesPerToken);
+
+    const { data: appTx } = await supabaseAdmin
+      .from("transactions")
+      .select("tokens_added")
+      .eq("type", "application")
+      .eq("status", "completed");
+
+    const application_tokens_consumed =
+      appTx?.reduce((acc, t) => acc + Math.abs(Number(t.tokens_added) || 0), 0) || 0;
+
+    const application_income_kes_estimate = Math.round(application_tokens_consumed * kesPerToken);
+
+    res.json({
+      total_customer_topup_kes,
+      total_tokens_outstanding,
+      outstanding_tokens_kes_estimate,
+      application_tokens_consumed,
+      application_income_kes_estimate,
+      kes_per_token_estimate: kesPerToken,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/users", async (req, res) => {
+  const role = String(req.query.role || "").toLowerCase();
+  try {
+    let q = supabaseAdmin
+      .from("profiles")
+      .select("id, email, full_name, role, is_active, created_at")
+      .in("role", ["seeker", "employer"])
+      .order("email", { ascending: true });
+
+    if (role === "seeker" || role === "employer") {
+      q = q.eq("role", role);
+    }
+
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ users: data ?? [] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/user/:userId", async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (pErr || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role === "admin") {
+      return res.status(403).json({ error: "Admin profile summary is not exposed here" });
+    }
+
+    const { data: wallet } = await supabaseAdmin
+      .from("wallets")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    let transactions: any[] = [];
+    let total_topup_kes = 0;
+    let application_tokens_spent = 0;
+    let employer_fees_tokens = 0;
+
+    if (wallet?.id) {
+      const { data: aggTx } = await supabaseAdmin
+        .from("transactions")
+        .select("tokens_added, type, amount_kes, status")
+        .eq("wallet_id", wallet.id);
+
+      for (const t of aggTx ?? []) {
+        if (t.type === "topup" && t.status === "completed") {
+          total_topup_kes += Number(t.amount_kes ?? 0);
+        }
+        if (t.type === "application" && t.status === "completed") {
+          application_tokens_spent += Math.abs(Number(t.tokens_added) || 0);
+        }
+        if (
+          (t.type === "employer_fee" || t.type === "employer_feature_fee") &&
+          t.status === "completed"
+        ) {
+          employer_fees_tokens += Math.abs(Number(t.tokens_added) || 0);
+        }
+      }
+
+      const { data: txs } = await supabaseAdmin
+        .from("transactions")
+        .select("id, tokens_added, type, amount_kes, status, reference_id, created_at")
+        .eq("wallet_id", wallet.id)
+        .order("created_at", { ascending: false })
+        .limit(80);
+      transactions = txs ?? [];
+    }
+
+    const kesPerToken = getKesPerToken();
+
+    let applications_count: number | null = null;
+    let jobs_posted_count: number | null = null;
+
+    if (profile.role === "seeker") {
+      const { count } = await supabaseAdmin
+        .from("applications")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId);
+      applications_count = count ?? 0;
+    }
+    if (profile.role === "employer") {
+      const { count } = await supabaseAdmin
+        .from("jobs")
+        .select("*", { count: "exact", head: true })
+        .eq("posted_by", userId);
+      jobs_posted_count = count ?? 0;
+    }
+
+    const token_balance = Number(wallet?.token_balance) || 0;
+    const active_tokens_kes_estimate = Math.round(token_balance * kesPerToken);
+
+    res.json({
+      profile,
+      wallet: wallet ?? null,
+      transactions,
+      summary: {
+        total_topup_kes,
+        application_tokens_spent,
+        employer_fees_tokens,
+        active_token_balance: token_balance,
+        active_tokens_kes_estimate,
+        applications_count,
+        jobs_posted_count,
+        kes_per_token_estimate: kesPerToken,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/users/set-active", async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = asNonEmptyString(body.userId);
+  const isActive = body.isActive === true || body.isActive === false ? body.isActive : null;
+
+  if (!userId || typeof isActive !== "boolean") {
+    return res.status(400).json({ error: "userId and boolean isActive required" });
+  }
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", userId)
+      .single();
+
+    if (pErr || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role === "admin") {
+      return res.status(403).json({ error: "Cannot change admin account status here" });
+    }
+
+    const { error: uErr } = await supabaseAdmin
+      .from("profiles")
+      .update({ is_active: isActive })
+      .eq("id", userId);
+
+    if (uErr) throw uErr;
+    res.json({ success: true, is_active: isActive });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/users/delete", async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = asNonEmptyString(body.userId);
+
+  if (!userId) {
+    return res.status(400).json({ error: "userId required" });
+  }
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", userId)
+      .single();
+
+    if (pErr || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role === "admin") {
+      return res.status(403).json({ error: "Cannot delete admin accounts via this API" });
+    }
+
+    const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(userId);
+    if (delErr) throw delErr;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Delete failed" });
   }
 });
 

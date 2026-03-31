@@ -1,5 +1,6 @@
-import { Briefcase, Coins, Eye } from "lucide-react";
+import { Briefcase, Coins, Eye, Building2 } from "lucide-react";
 import { cn } from "../lib/utils";
+import type { PublicEmployerCompany } from "./CompanyProfileSeekerModal";
 
 interface Job {
   id: string;
@@ -8,6 +9,8 @@ interface Job {
   job_type: string;
   token_cost: number;
   is_featured?: boolean;
+  area_of_business?: string | null;
+  employer?: PublicEmployerCompany | null;
 }
 
 interface JobCardProps {
@@ -15,6 +18,7 @@ interface JobCardProps {
   job: Job;
   onApply: (jobId: string) => void | Promise<void>;
   onViewDetails?: (job: Job) => void;
+  onViewCompany?: (job: Job) => void;
   isApplying?: boolean;
   isGuest?: boolean;
   hasApplied?: boolean;
@@ -25,11 +29,14 @@ export function JobCard({
   job,
   onApply,
   onViewDetails,
+  onViewCompany,
   isApplying,
   isGuest,
   hasApplied,
   hideApply,
 }: JobCardProps) {
+  const employerLabel = job.employer?.company_name?.trim() || null;
+
   return (
     <div className="p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.08] transition-all group relative overflow-hidden">
       <div className="flex justify-between items-start mb-4">
@@ -44,12 +51,28 @@ export function JobCard({
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3 mt-2 text-zinc-400 text-sm">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-zinc-400 text-sm">
             <span className="flex items-center gap-1">
               <Briefcase className="w-4 h-4" />
               {job.job_type}
             </span>
+            {job.area_of_business ? (
+              <span className="text-xs text-emerald-500/90" title="Profession sought for this role">
+                {job.area_of_business}
+              </span>
+            ) : null}
           </div>
+          {employerLabel ? (
+            <p className="text-xs text-zinc-500 mt-1.5 flex items-center gap-1.5">
+              <Building2 className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
+              <span className="text-zinc-400 truncate">{employerLabel}</span>
+            </p>
+          ) : onViewCompany ? (
+            <p className="text-xs text-zinc-600 mt-1.5 flex items-center gap-1.5">
+              <Building2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Employer</span>
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-sm font-medium border border-emerald-500/20">
           <Coins className="w-4 h-4" />
@@ -75,6 +98,16 @@ export function JobCard({
 
       {!hideApply && (
         <div className="flex flex-col gap-2">
+          {onViewCompany && (
+            <button
+              type="button"
+              onClick={() => onViewCompany(job)}
+              className="w-full py-2.5 rounded-xl font-medium border border-white/10 text-xs text-zinc-300 hover:bg-white/5 transition-all flex items-center justify-center gap-2"
+            >
+              <Building2 className="w-4 h-4 text-emerald-500/90" />
+              Company profile
+            </button>
+          )}
           {!isGuest && onViewDetails && (
             <button
               type="button"
@@ -109,15 +142,29 @@ export function JobCard({
         </div>
       )}
 
-      {hideApply && !isGuest && onViewDetails && (
-        <button
-          type="button"
-          onClick={() => onViewDetails(job)}
-          className="w-full py-3 rounded-xl font-medium border border-white/15 text-zinc-200 hover:bg-white/5 transition-all flex items-center justify-center gap-2"
-        >
-          <Eye className="w-4 h-4" />
-          View details
-        </button>
+      {hideApply && !isGuest && (
+        <div className="flex flex-col gap-2">
+          {onViewCompany && (
+            <button
+              type="button"
+              onClick={() => onViewCompany(job)}
+              className="w-full py-2.5 rounded-xl font-medium border border-white/10 text-xs text-zinc-300 hover:bg-white/5 transition-all flex items-center justify-center gap-2"
+            >
+              <Building2 className="w-4 h-4 text-emerald-500/90" />
+              Company profile
+            </button>
+          )}
+          {onViewDetails && (
+            <button
+              type="button"
+              onClick={() => onViewDetails(job)}
+              className="w-full py-3 rounded-xl font-medium border border-white/15 text-zinc-200 hover:bg-white/5 transition-all flex items-center justify-center gap-2"
+            >
+              <Eye className="w-4 h-4" />
+              View details
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

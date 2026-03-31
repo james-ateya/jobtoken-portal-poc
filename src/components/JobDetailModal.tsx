@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Briefcase, Coins, Calendar, Sparkles } from "lucide-react";
+import { X, Briefcase, Coins, Calendar, Sparkles, Building2 } from "lucide-react";
 import { cn } from "../lib/utils";
+import type { PublicEmployerCompany } from "./CompanyProfileSeekerModal";
 
 export type JobDetail = {
   id: string;
@@ -12,6 +13,8 @@ export type JobDetail = {
   is_featured?: boolean;
   created_at?: string;
   closes_at?: string | null;
+  area_of_business?: string | null;
+  employer?: PublicEmployerCompany | null;
 };
 
 type JobDetailModalProps = {
@@ -21,6 +24,7 @@ type JobDetailModalProps = {
   isApplying?: boolean;
   hasApplied?: boolean;
   hideApply?: boolean;
+  onViewCompany?: () => void;
 };
 
 export function JobDetailModal({
@@ -30,6 +34,7 @@ export function JobDetailModal({
   isApplying,
   hasApplied,
   hideApply,
+  onViewCompany,
 }: JobDetailModalProps) {
   const listingClosed =
     job?.closes_at != null && job.closes_at !== "" && new Date(job.closes_at) <= new Date();
@@ -92,6 +97,17 @@ export function JobDetailModal({
                   <Briefcase className="w-4 h-4 text-emerald-500" />
                   {job.job_type}
                 </span>
+                {job.area_of_business ? (
+                  <span
+                    className="inline-flex flex-wrap items-baseline gap-x-1.5 gap-y-0 text-emerald-400/90 text-sm"
+                    title="Profession or field the employer is hiring for in this role"
+                  >
+                    <span className="text-zinc-500 text-xs font-semibold uppercase tracking-wider">
+                      Profession
+                    </span>
+                    <span>{job.area_of_business}</span>
+                  </span>
+                ) : null}
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
                   <Coins className="w-3.5 h-3.5" />
                   {job.token_cost} tokens to apply
@@ -116,6 +132,34 @@ export function JobDetailModal({
                   </span>
                 )}
               </div>
+
+              {onViewCompany ? (
+                <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1">
+                        Employer
+                      </p>
+                      <p className="text-sm font-semibold text-white truncate">
+                        {job.employer?.company_name?.trim() || "Company profile"}
+                      </p>
+                      {job.employer?.office_location?.trim() ? (
+                        <p className="text-xs text-zinc-500 mt-1 truncate">
+                          {job.employer.office_location}
+                        </p>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onViewCompany}
+                      className="inline-flex items-center justify-center gap-2 shrink-0 px-4 py-2.5 rounded-xl border border-emerald-500/35 text-xs font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                    >
+                      <Building2 className="w-4 h-4" />
+                      Company profile
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {listingClosed && (
                 <p className="mt-4 text-sm text-red-400/90 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">

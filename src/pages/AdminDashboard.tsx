@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { motion } from "motion/react";
 import { 
@@ -17,7 +18,10 @@ import {
   Download,
   BarChart3,
   AlertTriangle,
-  Activity
+  Activity,
+  Star,
+  Banknote,
+  UserCircle,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { 
@@ -44,6 +48,15 @@ interface AdvancedStats {
   token_liability: number;
   revenue_per_category: Record<string, number>;
   avg_time_to_hire: string;
+}
+
+interface FinancialOverview {
+  total_customer_topup_kes: number;
+  total_tokens_outstanding: number;
+  outstanding_tokens_kes_estimate: number;
+  application_tokens_consumed: number;
+  application_income_kes_estimate: number;
+  kes_per_token_estimate: number;
 }
 
 interface AnalyticsReport {
@@ -80,6 +93,54 @@ interface Transaction {
   };
 }
 
+async function readApiErrorMessage(res: Response): Promise<string> {
+  const text = await res.text();
+  const t = text.trim();
+  if (!t || t.startsWith("<")) return `Request failed (${res.status})`;
+  try {
+    const j = JSON.parse(t) as { error?: string };
+    return j.error || `Request failed (${res.status})`;
+  } catch {
+    return t.slice(0, 160) || `Request failed (${res.status})`;
+  }
+}
+
+async function readApiJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  if (!text.trim()) {
+    throw new Error(
+      res.ok
+        ? "Empty response from server"
+        : `Request failed (${res.status}). Empty response body.`
+    );
+  }
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(text.slice(0, 200) || "Server returned non-JSON response");
+  }
+}
+
+/** Avoids crashing when /api is incorrectly served as SPA HTML (200 + <!doctype). */
+async function tryParseAdminApiJson<T>(res: Response): Promise<{
+  data: T | null;
+  htmlFallback: boolean;
+}> {
+  const text = await res.text();
+  if (!res.ok) return { data: null, htmlFallback: false };
+  const t = text.trim();
+  if (!t) return { data: null, htmlFallback: false };
+  const lower = t.slice(0, 32).toLowerCase();
+  if (t.startsWith("<") || lower.startsWith("<!doctype") || lower.startsWith("<html")) {
+    return { data: null, htmlFallback: true };
+  }
+  try {
+    return { data: JSON.parse(t) as T, htmlFallback: false };
+  } catch {
+    return { data: null, htmlFallback: false };
+  }
+}
+
 export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
   const [stats, setStats] = useState<PlatformStats | null>(null);
   const [advancedStats, setAdvancedStats] = useState<AdvancedStats | null>(null);
@@ -94,6 +155,9 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
   const [grantingTokens, setGrantingTokens] = useState(false);
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [featureJobTokensAdmin, setFeatureJobTokensAdmin] = useState("2");
+  const [savingFeatureTokens, setSavingFeatureTokens] = useState(false);
+  const [financialOverview, setFinancialOverview] = useState<FinancialOverview | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -104,34 +168,64 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
   const fetchAdminData = async () => {
     setLoading(true);
     try {
-      // Fetch Stats from API
-      const [statsRes, advStatsRes, analyticsRes, chartRes] = await Promise.all([
+      const [statsRes, advStatsRes, analyticsRes, chartRes, finRes] = await Promise.all([
         fetch("/api/admin/stats"),
         fetch("/api/admin/advanced-stats"),
         fetch("/api/admin/analytics-report"),
-        fetch("/api/admin/chart-data")
+        fetch("/api/admin/chart-data"),
+        fetch("/api/admin/financial-overview"),
       ]);
 
-      if (statsRes.ok) setStats(await statsRes.json());
-      if (advStatsRes.ok) setAdvancedStats(await advStatsRes.json());
-      if (analyticsRes.ok) setAnalyticsReport(await analyticsRes.json());
-      if (chartRes.ok) setChartData(await chartRes.json());
+      const statsParsed = await tryParseAdminApiJson<PlatformStats>(statsRes);
+      const advParsed = await tryParseAdminApiJson<AdvancedStats>(advStatsRes);
+      const analyticsParsed = await tryParseAdminApiJson<AnalyticsReport[]>(analyticsRes);
+      const chartParsed = await tryParseAdminApiJson<any[]>(chartRes);
+      const finParsed = await tryParseAdminApiJson<FinancialOverview>(finRes);
 
-      // Fetch Jobs
+      const htmlFallback =
+        statsParsed.htmlFallback ||
+        advParsed.htmlFallback ||
+        analyticsParsed.htmlFallback ||
+        chartParsed.htmlFallback ||
+        finParsed.htmlFallback;
+
+      if (statsParsed.data) setStats(statsParsed.data);
+      if (advParsed.data) setAdvancedStats(advParsed.data);
+      if (analyticsParsed.data) setAnalyticsReport(analyticsParsed.data);
+      if (chartParsed.data) setChartData(chartParsed.data);
+      if (finParsed.data) setFinancialOverview(finParsed.data);
+
+      if (htmlFallback) {
+        showToast(
+          "Admin API is not reachable (got the app page instead of JSON). Use npm run dev and open http://localhost:3000, or run the API on the same origin as this page.",
+          "error"
+        );
+      }
+
       const { data: jobsData } = await supabase
-        .from('jobs')
-        .select('*, profiles:posted_by(full_name, email)')
-        .order('created_at', { ascending: false });
+        .from("jobs")
+        .select("*, profiles:posted_by(full_name, email)")
+        .order("created_at", { ascending: false });
       if (jobsData) setJobs(jobsData as any);
 
-      // Fetch Transactions
       const { data: txData } = await supabase
-        .from('transactions')
-        .select('*, wallet:wallet_id(profiles:user_id(email))')
-        .order('created_at', { ascending: false })
+        .from("transactions")
+        .select("*, wallet:wallet_id(profiles:user_id(email))")
+        .order("created_at", { ascending: false })
         .limit(20);
       if (txData) setTransactions(txData as any);
 
+      const psRes = await fetch("/api/admin/platform-settings");
+      const psParsed = await tryParseAdminApiJson<{ feature_job_tokens: number }>(psRes);
+      if (psParsed.htmlFallback && !htmlFallback) {
+        showToast(
+          "Admin API is not reachable (got the app page instead of JSON). Use npm run dev on port 3000.",
+          "error"
+        );
+      }
+      if (psParsed.data && typeof psParsed.data.feature_job_tokens === "number") {
+        setFeatureJobTokensAdmin(String(psParsed.data.feature_job_tokens));
+      }
     } catch (error: any) {
       showToast(error.message, "error");
     } finally {
@@ -146,10 +240,9 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
       return;
     }
     try {
-      const res = await fetch(`/api/admin/global-search?query=${val}`);
-      if (res.ok) {
-        setSearchResults(await res.json());
-      }
+      const res = await fetch(`/api/admin/global-search?query=${encodeURIComponent(val)}`);
+      const parsed = await tryParseAdminApiJson<{ transactions: any[]; profiles: any[] }>(res);
+      if (parsed.data) setSearchResults(parsed.data);
     } catch (error) {
       console.error(error);
     }
@@ -193,13 +286,36 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
         setAnalyticsReport(analyticsReport.filter(r => r.id !== jobId));
         showToast("Job deleted successfully");
       } else {
-        const err = await response.json();
-        throw new Error(err.error);
+        throw new Error(await readApiErrorMessage(response));
       }
     } catch (error: any) {
       showToast(error.message, "error");
     } finally {
       setDeletingJobId(null);
+    }
+  };
+
+  const handleSaveFeaturedTokenPrice = async () => {
+    const n = parseInt(featureJobTokensAdmin.trim(), 10);
+    if (!Number.isFinite(n) || n < 0) {
+      showToast("Enter a valid non-negative integer", "error");
+      return;
+    }
+    setSavingFeatureTokens(true);
+    try {
+      const res = await fetch("/api/admin/platform-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feature_job_tokens: n }),
+      });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Save failed"));
+      showToast(`Featured job listing cost set to ${j.feature_job_tokens} token(s).`);
+      setFeatureJobTokensAdmin(String(j.feature_job_tokens));
+    } catch (error: any) {
+      showToast(error.message, "error");
+    } finally {
+      setSavingFeatureTokens(false);
     }
   };
 
@@ -218,8 +334,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
         setSearchEmail("");
         fetchAdminData();
       } else {
-        const err = await response.json();
-        throw new Error(err.error);
+        throw new Error(await readApiErrorMessage(response));
       }
     } catch (error: any) {
       showToast(error.message, "error");
@@ -249,7 +364,14 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
           </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            to="/admin/users"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold text-white hover:bg-white/10 transition-all"
+          >
+            <UserCircle className="w-4 h-4 text-emerald-400" />
+            Manage users
+          </Link>
           <div className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
             <input 
@@ -309,6 +431,102 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
           </button>
         </div>
       </div>
+
+      <section className="mb-8 p-6 rounded-3xl border border-amber-500/20 bg-amber-500/[0.04]">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold flex items-center gap-2 text-amber-200">
+              <Star className="w-5 h-5 text-amber-400" />
+              Employer featured listings
+            </h2>
+            <p className="text-sm text-zinc-500 mt-1 max-w-xl">
+              Token cost deducted from the employer wallet when they enable &quot;Featured&quot; on a
+              new job or upgrade an existing non-featured job. Same wallet and expiry rules as job
+              seeker top-ups. Set to 0 to make featuring free.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest whitespace-nowrap">
+              Tokens per feature
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={1000000}
+              value={featureJobTokensAdmin}
+              onChange={(e) => setFeatureJobTokensAdmin(e.target.value)}
+              className="w-28 bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm font-mono text-white focus:outline-none focus:border-amber-500/50"
+            />
+            <button
+              type="button"
+              onClick={handleSaveFeaturedTokenPrice}
+              disabled={savingFeatureTokens}
+              className="px-4 py-2.5 bg-amber-500 text-black rounded-xl text-sm font-bold hover:bg-amber-400 transition-colors disabled:opacity-50 flex items-center gap-2"
+            >
+              {savingFeatureTokens ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              Save
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {financialOverview && (
+        <section className="mb-8 p-8 rounded-3xl border border-emerald-500/25 bg-gradient-to-br from-emerald-500/[0.07] to-transparent">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center text-emerald-400">
+              <Banknote className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-white">Token economy snapshot</h2>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                KES estimates use your server&apos;s MPESA_KES_PER_TOKEN (
+                {financialOverview.kes_per_token_estimate} Ksh per token).
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="p-5 rounded-2xl border border-white/10 bg-black/20">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                Customer top-ups received
+              </p>
+              <p className="text-2xl font-bold text-white tabular-nums">
+                Ksh {Math.round(financialOverview.total_customer_topup_kes).toLocaleString()}
+              </p>
+              <p className="text-[11px] text-zinc-500 mt-2">
+                M-Pesa payments recorded on completed top-up transactions (money collected for token
+                purchases).
+              </p>
+            </div>
+            <div className="p-5 rounded-2xl border border-white/10 bg-black/20">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                Total tokens outstanding
+              </p>
+              <p className="text-2xl font-bold text-white tabular-nums">
+                {financialOverview.total_tokens_outstanding.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-zinc-400 mt-2">
+                Unspent balance across all wallets (~Ksh{" "}
+                {Math.round(financialOverview.outstanding_tokens_kes_estimate).toLocaleString()}{" "}
+                at current rate).
+              </p>
+            </div>
+            <div className="p-5 rounded-2xl border border-white/10 bg-black/20">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                Income from job applications
+              </p>
+              <p className="text-2xl font-bold text-emerald-400/95 tabular-nums">
+                {financialOverview.application_tokens_consumed.toLocaleString()}{" "}
+                <span className="text-base font-semibold text-zinc-400">tokens</span>
+              </p>
+              <p className="text-[11px] text-zinc-400 mt-2">
+                Tokens consumed when seekers applied (~Ksh{" "}
+                {Math.round(financialOverview.application_income_kes_estimate).toLocaleString()}{" "}
+                at current rate).
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Stats Grid - Vital Signs */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
