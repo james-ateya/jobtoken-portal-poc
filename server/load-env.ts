@@ -8,6 +8,10 @@ import dotenv from "dotenv";
  * tries project root and cwd, and applies .env.local over .env.
  */
 export function loadProjectEnv(): { projectRoot: string; loadedFiles: string[] } {
+  if (process.env.VERCEL) {
+    return { projectRoot: process.cwd(), loadedFiles: [] };
+  }
+
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const candidates = [
     path.join(projectRoot, ".env"),

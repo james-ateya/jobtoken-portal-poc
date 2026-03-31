@@ -1,8 +1,8 @@
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
-import { loadProjectEnv } from "./load-env";
-import { sendMail } from "./mail";
+import { loadProjectEnv } from "./load-env.js";
+import { sendMail } from "./mail.js";
 import {
   getTokenPacks,
   getTopupKesBounds,
@@ -11,8 +11,8 @@ import {
   parseStkCallbackBody,
   resolveTokensForTopupKes,
   type StkCallbackParsed,
-} from "./mpesa";
-import { processStkCallback } from "./process-stk-callback";
+} from "./mpesa.js";
+import { processStkCallback } from "./process-stk-callback.js";
 
 const { loadedFiles } = loadProjectEnv();
 if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
@@ -20,6 +20,26 @@ if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
 }
 
 const app = express();
+
+// Vercel often forwards /api/* to the function with url like /mpesa/callback (no /api prefix).
+if (process.env.VERCEL) {
+  app.use((req, _res, next) => {
+    const raw = req.url ?? "/";
+    const q = raw.indexOf("?");
+    const pathOnly = q === -1 ? raw : raw.slice(0, q);
+    const query = q === -1 ? "" : raw.slice(q);
+    const needsApi =
+      pathOnly &&
+      pathOnly !== "/" &&
+      !pathOnly.startsWith("/api/") &&
+      pathOnly !== "/api" &&
+      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin)\b/.test(pathOnly);
+    if (needsApi) {
+      req.url = "/api" + pathOnly + query;
+    }
+    next();
+  });
+}
 
 app.use(express.json());
 app.use(cors());

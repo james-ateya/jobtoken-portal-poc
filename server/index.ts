@@ -1,7 +1,6 @@
 /**
- * Vercel serverless entry: keep this file free of `vite` imports so the
- * function bundle stays small and cold starts succeed.
+ * Optional re-export (e.g. older tooling). Production on Vercel uses `api/index.ts`.
  */
-import app from "./app";
+import app from "./app.js";
 
 export default app;

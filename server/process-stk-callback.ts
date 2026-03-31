@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { StkCallbackParsed } from "./mpesa";
-import { resolveTokensForTopupKes } from "./mpesa";
+import type { StkCallbackParsed } from "./mpesa.js";
+import { resolveTokensForTopupKes } from "./mpesa.js";
 
 export type StkProcessResult =
   | { outcome: "ignored" }

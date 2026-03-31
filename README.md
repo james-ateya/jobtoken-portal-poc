@@ -75,7 +75,7 @@ Employers need a `wallets` row with enough balance (e.g. after admin grant or fu
 
 ## Deployment (Vercel)
 
-Add the same variables as in `.env.example` (Supabase, **Resend** and/or SMTP, M-Pesa, `APP_URL` = production site URL). Routes under `/api/*` are handled by `server/index.ts` (Vercel entry) and `server/app.ts` (Express app) per `vercel.json`. Local dev uses `server/dev-server.ts`.
+Add the same variables as in `.env.example` (Supabase, **Resend** and/or SMTP, M-Pesa, `APP_URL` = production site URL). Routes under `/api/*` are handled by `api/index.ts` (Vercel serverless entry) and `server/app.ts` (Express app). Local dev uses `server/dev-server.ts`.
 
 ## Troubleshooting
 
