@@ -2,7 +2,18 @@ import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { motion, AnimatePresence } from "motion/react";
-import { Briefcase, Users, Plus, ChevronRight, Loader2, ArrowLeft, Send } from "lucide-react";
+import {
+  Briefcase,
+  Users,
+  Plus,
+  ChevronRight,
+  Loader2,
+  ArrowLeft,
+  Send,
+  Bell,
+  Star,
+} from "lucide-react";
+import { ApplicationThread } from "../components/ApplicationThread";
 import { cn } from "../lib/utils";
 
 interface Job {
@@ -16,10 +27,17 @@ interface Job {
 }
 
 interface Applicant {
+  application_id: string;
   id: string;
   full_name: string;
   email: string;
   created_at: string;
+  phone?: string | null;
+  location?: string | null;
+  education?: string | null;
+  experience?: string | null;
+  skills?: string | null;
+  linkedin_url?: string | null;
 }
 
 export function EmployerDashboard({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
@@ -35,13 +53,56 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     title: "",
     description: "",
     job_type: "",
-    token_cost: 1
+    token_cost: 1,
+    is_featured: false,
   });
   const [posting, setPosting] = useState(false);
+  const [employerTokens, setEmployerTokens] = useState<number | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notifications, setNotifications] = useState<any[]>([]);
 
   useEffect(() => {
-    if (user) fetchEmployerJobs();
+    if (user) {
+      fetchEmployerJobs();
+      fetchEmployerWallet();
+      fetchNotifications();
+    }
   }, [user]);
+
+  const fetchEmployerWallet = async () => {
+    if (!user?.id) return;
+    const { data } = await supabase
+      .from("wallets")
+      .select("token_balance")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    setEmployerTokens(data?.token_balance ?? 0);
+  };
+
+  const fetchNotifications = async () => {
+    if (!user?.id) return;
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (error) {
+      console.warn("notifications:", error.message);
+      return;
+    }
+    if (data) setNotifications(data);
+  };
+
+  const unreadCount = notifications.filter((n) => !n.read_at).length;
+
+  const markNotificationRead = async (id: string) => {
+    await supabase
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("id", id);
+    fetchNotifications();
+  };
 
   const fetchEmployerJobs = async () => {
     setLoading(true);
@@ -77,22 +138,36 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
       const { data, error } = await supabase
         .from("applications")
         .select(`
+          id,
           created_at,
           profiles:user_id (
             id,
             full_name,
-            email
+            email,
+            phone,
+            location,
+            education,
+            experience,
+            skills,
+            linkedin_url
           )
         `)
         .eq("job_id", jobId);
 
       if (error) throw error;
-      
+
       const formattedApplicants = data.map((item: any) => ({
+        application_id: item.id,
         id: item.profiles.id,
         full_name: item.profiles.full_name,
         email: item.profiles.email,
-        created_at: item.created_at
+        created_at: item.created_at,
+        phone: item.profiles.phone,
+        location: item.profiles.location,
+        education: item.profiles.education,
+        experience: item.profiles.experience,
+        skills: item.profiles.skills,
+        linkedin_url: item.profiles.linkedin_url,
       }));
       
       setApplicants(formattedApplicants);
@@ -113,17 +188,33 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
 
     setPosting(true);
     try {
-      const { error } = await supabase.from("jobs").insert({
-        ...newJob,
-        posted_by: user.id
+      const response = await fetch("/api/employer/post-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: user.id,
+          title: newJob.title,
+          description: newJob.description,
+          job_type: newJob.job_type,
+          token_cost: newJob.token_cost,
+          is_featured: newJob.is_featured,
+        }),
       });
 
-      if (error) throw error;
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Failed to post job");
 
       showToast("Job posted successfully!");
       setShowPostForm(false);
-      setNewJob({ title: "", description: "", job_type: "", token_cost: 1 });
+      setNewJob({
+        title: "",
+        description: "",
+        job_type: "",
+        token_cost: 1,
+        is_featured: false,
+      });
       fetchEmployerJobs();
+      fetchEmployerWallet();
     } catch (error: any) {
       showToast(error.message, "error");
     } finally {
@@ -150,9 +241,61 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Employer Portal</h1>
           <p className="text-zinc-500 mt-1">Manage your job listings and track applicants.</p>
+          {employerTokens !== null && (
+            <p className="text-xs text-zinc-400 mt-2">
+              Employer wallet:{" "}
+              <span className="text-emerald-400 font-bold">{employerTokens}</span> tokens
+              (used for posting &amp; featured listings)
+            </p>
+          )}
         </div>
         {!selectedJob && !showPostForm && (
-          <div className="flex gap-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setNotificationsOpen((o) => !o);
+                  fetchNotifications();
+                }}
+                className="flex items-center justify-center gap-2 px-4 py-3 bg-white/5 text-white border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all"
+              >
+                <Bell className="w-5 h-5" />
+                {unreadCount > 0 && (
+                  <span className="text-xs bg-emerald-500 text-black px-2 py-0.5 rounded-full">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+              {notificationsOpen && (
+                <div className="absolute right-0 top-full mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-white/10 bg-zinc-950 shadow-xl z-50 p-2">
+                  {notifications.length === 0 ? (
+                    <p className="text-zinc-500 text-sm p-4 text-center">No notifications</p>
+                  ) : (
+                    notifications.map((n) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => markNotificationRead(n.id)}
+                        className={cn(
+                          "w-full text-left p-3 rounded-lg mb-1 border border-transparent hover:border-white/10",
+                          !n.read_at ? "bg-emerald-500/10" : "bg-white/5"
+                        )}
+                      >
+                        <p className="text-xs font-bold text-emerald-400">{n.type}</p>
+                        <p className="text-sm text-zinc-200 mt-1">
+                          {(n.payload as any)?.seeker_name || "Applicant"} —{" "}
+                          {(n.payload as any)?.job_title || "Job"}
+                        </p>
+                        <p className="text-[10px] text-zinc-500 mt-1">
+                          {new Date(n.created_at).toLocaleString()}
+                        </p>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
             <Link
               to="/dashboard/employer/applications"
               className="flex items-center justify-center gap-2 px-6 py-3 bg-white/5 text-white border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all active:scale-[0.98]"
@@ -161,6 +304,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
               Manage All Applications
             </Link>
             <button
+              type="button"
               onClick={() => setShowPostForm(true)}
               className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500 text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98]"
             >
@@ -238,11 +382,30 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     min="1"
                     required
                     value={newJob.token_cost}
-                    onChange={(e) => setNewJob({...newJob, token_cost: parseInt(e.target.value)})}
+                    onChange={(e) => setNewJob({...newJob, token_cost: parseInt(e.target.value, 10) || 1})}
                     className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
                   />
                 </div>
               </div>
+
+              <label className="flex items-start gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newJob.is_featured}
+                  onChange={(e) => setNewJob({ ...newJob, is_featured: e.target.checked })}
+                  className="mt-1 rounded border-white/20"
+                />
+                <div>
+                  <span className="flex items-center gap-2 text-sm font-medium text-white">
+                    <Star className="w-4 h-4 text-amber-400" />
+                    Featured listing
+                  </span>
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Higher visibility on the job board. Charges extra employer tokens (see{" "}
+                    <code className="text-zinc-400">FEATURE_JOB_TOKENS</code> on the server).
+                  </p>
+                </div>
+              </label>
 
               <button
                 type="submit"
@@ -287,16 +450,33 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             ) : applicants.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {applicants.map((applicant) => (
-                  <div key={applicant.id} className="p-6 rounded-2xl border border-white/10 bg-white/5">
+                  <div key={applicant.application_id} className="p-6 rounded-2xl border border-white/10 bg-white/5">
                     <div className="w-12 h-12 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-4">
                       <Users className="w-6 h-6" />
                     </div>
                     <h3 className="text-lg font-bold text-white mb-1">{applicant.full_name}</h3>
-                    <p className="text-zinc-400 text-sm mb-4">{applicant.email}</p>
-                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                    <p className="text-zinc-400 text-sm mb-2">{applicant.email}</p>
+                    {(applicant.phone || applicant.location) && (
+                      <p className="text-xs text-zinc-500 mb-2">
+                        {[applicant.phone, applicant.location].filter(Boolean).join(" · ")}
+                      </p>
+                    )}
+                    {applicant.education && (
+                      <p className="text-xs text-zinc-400 line-clamp-3 mb-2 whitespace-pre-wrap">
+                        {applicant.education}
+                      </p>
+                    )}
+                    {applicant.skills && (
+                      <p className="text-[11px] text-emerald-500/90 mb-3 line-clamp-2">{applicant.skills}</p>
+                    )}
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
                       <span>Applied on</span>
                       <span>{new Date(applicant.created_at).toLocaleDateString()}</span>
                     </div>
+                    <ApplicationThread
+                      applicationId={applicant.application_id}
+                      currentUserId={user.id}
+                    />
                   </div>
                 ))}
               </div>

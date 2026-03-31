@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { JobCard } from "../components/JobCard";
+import { JobDetailModal } from "../components/JobDetailModal";
 import { WalletDashboard } from "../components/WalletDashboard";
 import { RefreshCw, LayoutDashboard, Briefcase } from "lucide-react";
 
@@ -11,8 +12,8 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
   const [balance, setBalance] = useState(0);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState<string | null>(null);
-  const [isTopupLoading, setIsTopupLoading] = useState(false);
   const [userApplications, setUserApplications] = useState<string[]>([]);
+  const [detailJob, setDetailJob] = useState<any | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -24,10 +25,19 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
   }, [user]);
 
   const fetchJobs = async () => {
-    const { data, error } = await supabase.from("jobs").select("*").order('created_at', { ascending: false });
-    if (!error && data) {
-      setJobs(data);
+    let { data, error } = await supabase
+      .from("jobs")
+      .select("*")
+      .order("is_featured", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (error) {
+      const fallback = await supabase
+        .from("jobs")
+        .select("*")
+        .order("created_at", { ascending: false });
+      data = fallback.data;
     }
+    if (data) setJobs(data);
   };
 
   const fetchUserApplications = async (userId: string) => {
@@ -74,14 +84,20 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
 
       if (data.success) {
         showToast("Application submitted successfully!");
+        setDetailJob(null);
         fetchWallet(user.id);
         fetchUserApplications(user.id);
-        
-        // Trigger confirmation email
+
         fetch("/api/auth/resend-verification", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: user.email, type: 'application_confirmation', jobId }),
+          body: JSON.stringify({ email: user.email, type: "application_confirmation", jobId }),
+        }).catch(console.error);
+
+        fetch("/api/applications/notify-employer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId, seekerUserId: user.id }),
         }).catch(console.error);
       } else {
         showToast(data.error || "Failed to apply", "error");
@@ -93,38 +109,22 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
     }
   };
 
-  const handleTopup = async () => {
-    if (!user) return;
-
-    setIsTopupLoading(true);
-    try {
-      const response = await fetch("/api/topup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id }),
-      });
-
-      const result = await response.json();
-
-      if (response.ok) {
-        setBalance(result.newBalance);
-        showToast("Tokens added successfully!");
-      } else {
-        showToast(result.error || "Topup failed", "error");
-      }
-    } catch (error: any) {
-      console.error("Topup error:", error);
-      showToast(error.message === "Failed to fetch" ? "Network error: Could not connect to server" : `Error: ${error.message}`, "error");
-    } finally {
-      setIsTopupLoading(false);
-    }
-  };
-
   const filteredJobs = filter === "all" 
     ? jobs 
     : jobs.filter(job => job.job_type === filter);
 
   return (
+    <>
+      <JobDetailModal
+        job={detailJob}
+        onClose={() => setDetailJob(null)}
+        onApply={async (jobId) => {
+          await handleApply(jobId);
+        }}
+        isApplying={detailJob ? isApplying === detailJob.id : false}
+        hasApplied={detailJob ? userApplications.includes(detailJob.id) : false}
+        hideApply={user?.user_metadata?.role === "employer"}
+      />
     <main className="max-w-7xl mx-auto px-6 py-12">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
         <div className="lg:col-span-8 space-y-8">
@@ -154,14 +154,15 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {filteredJobs.length > 0 ? (
               filteredJobs.map((job) => (
-                <JobCard 
-                  key={job.id} 
-                  job={job} 
+                <JobCard
+                  key={job.id}
+                  job={job}
                   onApply={handleApply}
+                  onViewDetails={user ? (j) => setDetailJob(j) : undefined}
                   isApplying={isApplying === job.id}
                   isGuest={!user}
                   hasApplied={userApplications.includes(job.id)}
-                  hideApply={user?.user_metadata?.role === 'employer'}
+                  hideApply={user?.user_metadata?.role === "employer"}
                 />
               ))
             ) : (
@@ -182,10 +183,9 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
             </h2>
             
             {user ? (
-              <WalletDashboard 
-                balance={balance} 
-                onTopup={handleTopup}
-                isTopupLoading={isTopupLoading}
+              <WalletDashboard
+                balance={balance}
+                onBalanceRefresh={() => fetchWallet(user.id)}
                 userId={user.id}
                 expiresAt={expiresAt}
               />
@@ -205,5 +205,6 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
         </div>
       </div>
     </main>
+    </>
   );
 }

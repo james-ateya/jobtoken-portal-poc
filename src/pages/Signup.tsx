@@ -39,16 +39,16 @@ export function SignupPage() {
         setError(error.message);
         setLoading(false);
       } else {
-        // Use our custom resend route to ensure delivery via Resend
+        // Custom verification email (SMTP or Resend on server)
         try {
           await fetch("/api/auth/resend-verification", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
           });
-          alert("Registration successful! A verification email has been sent to your inbox via Resend.");
+          alert("Registration successful! A verification email has been sent to your inbox.");
         } catch (err) {
-          alert("Registration successful, but failed to trigger Resend. Please try resending from the login page.");
+          alert("Registration successful, but the verification email could not be sent. Try resending from the login page.");
         }
         navigate("/login");
       }

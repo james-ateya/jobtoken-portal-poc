@@ -51,7 +51,7 @@ export function LoginPage() {
       });
       const result = await response.json();
       if (response.ok) {
-        alert("Verification email sent via Resend! Please check your inbox.");
+        alert("Verification email sent. Please check your inbox.");
         setShowResend(false);
       } else {
         alert(result.error || "Failed to resend email");
@@ -120,7 +120,7 @@ export function LoginPage() {
                   className="text-emerald-400 hover:text-emerald-300 font-medium underline text-left flex items-center gap-2"
                 >
                   {resending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-                  Resend verification email via Resend
+                  Resend verification email
                 </button>
               )}
             </div>

@@ -1,8 +1,20 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Fragment } from "react";
 import { supabase } from "../lib/supabase";
 import { motion, AnimatePresence } from "motion/react";
-import { CheckCircle, XCircle, Loader2, Mail, User, Briefcase, MessageSquare } from "lucide-react";
+import {
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Mail,
+  User,
+  Briefcase,
+  MessageSquare,
+  ChevronDown,
+  ChevronUp,
+  IdCard,
+} from "lucide-react";
 import { cn } from "../lib/utils";
+import { ApplicationThread } from "../components/ApplicationThread";
 
 interface Application {
   id: string;
@@ -12,12 +24,52 @@ interface Application {
   job_title: string;
   applicant_name: string;
   applicant_email: string;
+  applicant_phone?: string | null;
+  applicant_location?: string | null;
+  applicant_education?: string | null;
+  applicant_experience?: string | null;
+  applicant_skills?: string | null;
+  applicant_linkedin?: string | null;
+}
+
+function ApplicantProfileDetails({ app }: { app: Application }) {
+  const rows: { label: string; value: string }[] = [];
+  if (app.applicant_phone) rows.push({ label: "Phone", value: app.applicant_phone });
+  if (app.applicant_location) rows.push({ label: "Location", value: app.applicant_location });
+  if (app.applicant_education) rows.push({ label: "Education", value: app.applicant_education });
+  if (app.applicant_experience) rows.push({ label: "Experience", value: app.applicant_experience });
+  if (app.applicant_skills) rows.push({ label: "Skills", value: app.applicant_skills });
+  if (app.applicant_linkedin) rows.push({ label: "LinkedIn", value: app.applicant_linkedin });
+
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-zinc-500 italic">
+        This candidate has not filled in their extended profile yet. Encourage them to complete{" "}
+        <strong className="text-zinc-400">My profile</strong> on their dashboard.
+      </p>
+    );
+  }
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 text-sm">
+      {rows.map((row) => (
+        <div key={row.label} className="rounded-xl border border-white/10 bg-white/5 p-3">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1">
+            {row.label}
+          </p>
+          <p className="text-zinc-200 whitespace-pre-wrap">{row.value}</p>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function EmployerApplicationsPage({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [profileExpandedId, setProfileExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     if (user) fetchApplications();
@@ -33,19 +85,25 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
         .select(`
           id,
           status,
-          employer_notes,
-          applied_at,
+          notes,
+          created_at,
           jobs!inner (
             title,
             posted_by
           ),
           profiles:user_id (
             full_name,
-            email
+            email,
+            phone,
+            location,
+            education,
+            experience,
+            skills,
+            linkedin_url
           )
         `)
         .eq("jobs.posted_by", user.id)
-        .order("applied_at", { ascending: false });
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
 
@@ -56,7 +114,13 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
         created_at: app.created_at,
         job_title: app.jobs.title,
         applicant_name: app.profiles.full_name,
-        applicant_email: app.profiles.email
+        applicant_email: app.profiles.email,
+        applicant_phone: app.profiles.phone,
+        applicant_location: app.profiles.location,
+        applicant_education: app.profiles.education,
+        applicant_experience: app.profiles.experience,
+        applicant_skills: app.profiles.skills,
+        applicant_linkedin: app.profiles.linkedin_url,
       }));
 
       setApplications(formatted);
@@ -117,12 +181,15 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Job Position</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Status</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Applied On</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Profile</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Messages</th>
                 <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {applications.map((app) => (
-                <tr key={app.id} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                <Fragment key={app.id}>
+                <tr className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-zinc-400">
@@ -156,6 +223,38 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                   <td className="px-6 py-4 text-sm text-zinc-500">
                     {new Date(app.created_at).toLocaleDateString()}
                   </td>
+                  <td className="px-6 py-4">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setProfileExpandedId((id) => (id === app.id ? null : app.id))
+                      }
+                      className="p-2 rounded-lg border border-white/10 text-zinc-400 hover:text-white"
+                      title="Applicant profile"
+                    >
+                      {profileExpandedId === app.id ? (
+                        <ChevronUp className="w-4 h-4" />
+                      ) : (
+                        <IdCard className="w-4 h-4" />
+                      )}
+                    </button>
+                  </td>
+                  <td className="px-6 py-4">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedId((id) => (id === app.id ? null : app.id))
+                      }
+                      className="p-2 rounded-lg border border-white/10 text-zinc-400 hover:text-white"
+                      title="Messages"
+                    >
+                      {expandedId === app.id ? (
+                        <ChevronUp className="w-4 h-4" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4" />
+                      )}
+                    </button>
+                  </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-2">
                       {app.status === 'pending' ? (
@@ -186,6 +285,24 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                     </div>
                   </td>
                 </tr>
+                {profileExpandedId === app.id && (
+                  <tr className="border-b border-white/5 bg-zinc-950/80">
+                    <td colSpan={7} className="px-6 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3">
+                        Applicant profile
+                      </p>
+                      <ApplicantProfileDetails app={app} />
+                    </td>
+                  </tr>
+                )}
+                {expandedId === app.id && (
+                  <tr className="border-b border-white/5 bg-black/20">
+                    <td colSpan={7} className="px-6 py-4">
+                      <ApplicationThread applicationId={app.id} currentUserId={user.id} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
