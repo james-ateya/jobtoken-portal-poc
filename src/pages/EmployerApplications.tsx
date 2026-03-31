@@ -2,19 +2,21 @@ import React, { useState, useEffect, Fragment } from "react";
 import { supabase } from "../lib/supabase";
 import { motion, AnimatePresence } from "motion/react";
 import {
-  CheckCircle,
-  XCircle,
   Loader2,
   Mail,
   User,
   Briefcase,
-  MessageSquare,
   ChevronDown,
   ChevronUp,
   IdCard,
+  GitBranch,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ApplicationThread } from "../components/ApplicationThread";
+import {
+  APPLICATION_STATUSES,
+  applicationStatusLabel,
+} from "../lib/applicationStatus";
 
 interface Application {
   id: string;
@@ -64,12 +66,33 @@ function ApplicantProfileDetails({ app }: { app: Application }) {
   );
 }
 
+function employerStatusPillClass(status: string) {
+  switch (status) {
+    case "rejected":
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+    case "pending":
+      return "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+    case "reviewing":
+      return "bg-slate-500/10 text-slate-300 border-slate-500/20";
+    case "qualified":
+    case "interview":
+    case "shortlisted":
+    case "offer":
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+    default:
+      return "bg-zinc-500/10 text-zinc-400 border-zinc-500/20";
+  }
+}
+
 export function EmployerApplicationsPage({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [profileExpandedId, setProfileExpandedId] = useState<string | null>(null);
+  const [stageModalApp, setStageModalApp] = useState<Application | null>(null);
+  const [stageChoice, setStageChoice] = useState<string>("pending");
+  const [stageNotes, setStageNotes] = useState("");
 
   useEffect(() => {
     if (user) fetchApplications();
@@ -131,16 +154,25 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
     }
   };
 
-  const handleUpdateStatus = async (applicationId: string, status: 'shortlisted' | 'rejected') => {
-    const notes = prompt(`Add a note for the applicant (optional):`);
-    if (notes === null) return; // Cancelled
+  const openStageModal = (app: Application) => {
+    setStageModalApp(app);
+    setStageChoice(app.status || "pending");
+    setStageNotes(app.notes || "");
+  };
 
-    setProcessingId(applicationId);
+  const submitStageUpdate = async () => {
+    if (!stageModalApp) return;
+    setProcessingId(stageModalApp.id);
     try {
       const response = await fetch("/api/applications/update-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ applicationId, status, notes }),
+        body: JSON.stringify({
+          applicationId: stageModalApp.id,
+          status: stageChoice,
+          notes: stageNotes,
+          employerUserId: user.id,
+        }),
       });
 
       if (!response.ok) {
@@ -148,7 +180,8 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
         throw new Error(err.error || "Failed to update status");
       }
 
-      showToast(`Applicant ${status} successfully!`);
+      showToast("Applicant notified and status saved.");
+      setStageModalApp(null);
       fetchApplications();
     } catch (error: any) {
       showToast(error.message, "error");
@@ -211,13 +244,13 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={cn(
-                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border",
-                      app.status === 'shortlisted' ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
-                      app.status === 'rejected' ? "bg-red-500/10 text-red-400 border-red-500/20" :
-                      "bg-yellow-500/10 text-yellow-400 border-yellow-500/20"
-                    )}>
-                      {app.status}
+                    <span
+                      className={cn(
+                        "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border",
+                        employerStatusPillClass(app.status || "pending")
+                      )}
+                    >
+                      {applicationStatusLabel(app.status || "pending")}
                     </span>
                   </td>
                   <td className="px-6 py-4 text-sm text-zinc-500">
@@ -256,33 +289,19 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
                     </button>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      {app.status === 'pending' ? (
-                        <>
-                          <button
-                            onClick={() => handleUpdateStatus(app.id, 'shortlisted')}
-                            disabled={processingId === app.id}
-                            className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-black transition-all"
-                            title="Shortlist"
-                          >
-                            {processingId === app.id ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle className="w-5 h-5" />}
-                          </button>
-                          <button
-                            onClick={() => handleUpdateStatus(app.id, 'rejected')}
-                            disabled={processingId === app.id}
-                            className="p-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-all"
-                            title="Reject"
-                          >
-                            {processingId === app.id ? <Loader2 className="w-5 h-5 animate-spin" /> : <XCircle className="w-5 h-5" />}
-                          </button>
-                        </>
+                    <button
+                      type="button"
+                      onClick={() => openStageModal(app)}
+                      disabled={processingId === app.id}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 text-xs font-bold uppercase tracking-wider text-zinc-200 hover:bg-white/10 transition-colors"
+                    >
+                      {processingId === app.id ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
                       ) : (
-                        <div className="flex items-center gap-2 text-zinc-600 italic text-xs">
-                          <MessageSquare className="w-3 h-3" />
-                          Reviewed
-                        </div>
+                        <GitBranch className="w-4 h-4 text-emerald-400" />
                       )}
-                    </div>
+                      Stage / note
+                    </button>
                   </td>
                 </tr>
                 {profileExpandedId === app.id && (
@@ -314,6 +333,79 @@ export function EmployerApplicationsPage({ user, showToast }: { user: any, showT
           <p className="text-zinc-500 mt-2">When candidates apply for your jobs, they will appear here.</p>
         </div>
       )}
+
+      <AnimatePresence>
+        {stageModalApp && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+            onClick={() => setStageModalApp(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-950 p-6 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-bold text-white mb-1">Application funnel</h3>
+              <p className="text-sm text-zinc-500 mb-4">
+                {stageModalApp.applicant_name} — {stageModalApp.job_title}
+              </p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                Stage
+              </p>
+              <select
+                value={stageChoice}
+                onChange={(e) => setStageChoice(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white mb-4 focus:outline-none focus:border-emerald-500"
+              >
+                {APPLICATION_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {applicationStatusLabel(s)}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                Note to applicant (optional)
+              </p>
+              <textarea
+                value={stageNotes}
+                onChange={(e) => setStageNotes(e.target.value)}
+                rows={4}
+                placeholder="e.g. Next interview Tuesday 10am, bring portfolio…"
+                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 resize-none mb-2"
+              />
+              <p className="text-xs text-zinc-600 mb-4">
+                The applicant receives an email and an in-app notification when you save.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setStageModalApp(null)}
+                  className="flex-1 py-3 rounded-xl border border-white/15 text-zinc-300 font-medium hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => submitStageUpdate()}
+                  disabled={processingId === stageModalApp.id}
+                  className="flex-1 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {processingId === stageModalApp.id ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    "Save & notify"
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </main>
   );
 }

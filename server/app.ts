@@ -404,22 +404,155 @@ app.post("/api/applications/notify-employer", async (req, res) => {
   }
 });
 
-app.post("/api/applications/update-status", async (req, res) => {
-  const { applicationId, status, notes } = req.body;
+const APPLICATION_STATUS_WHITELIST = new Set([
+  "pending",
+  "reviewing",
+  "qualified",
+  "interview",
+  "shortlisted",
+  "offer",
+  "rejected",
+]);
 
-  if (!applicationId || !status) {
-    return res.status(400).json({ error: "Missing applicationId or status" });
+function escapeHtml(s: string) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function statusEmailCopy(status: string, jobTitle: string, applicantName: string, notes: string) {
+  const jt = escapeHtml(jobTitle);
+  const an = escapeHtml(applicantName);
+  const safeNotes = notes
+    ? `<p style="margin-top:16px;padding:12px;background:#f4f4f5;border-radius:8px;"><strong>Message from the employer:</strong><br/>${escapeHtml(notes).replace(/\n/g, "<br/>")}</p>`
+    : "";
+  const intro = (body: string) => `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+          <p>Hi ${an},</p>
+          ${body}
+          ${safeNotes}
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
+          <p style="color: #666; font-size: 12px;">Open JobToken to see your full application history and message thread.</p>
+        </div>
+      `;
+
+  switch (status) {
+    case "reviewing":
+      return {
+        subject: `Application update: ${jt}`,
+        html: intro(
+          `<p>Your application for <strong>${jt}</strong> is now <strong>under review</strong>.</p>`
+        ),
+      };
+    case "qualified":
+      return {
+        subject: `You've been qualified — ${jt}`,
+        html: intro(
+          `<p>Good news: the employer has marked you as <strong>qualified</strong> for <strong>${jt}</strong>.</p>`
+        ),
+      };
+    case "interview":
+      return {
+        subject: `Interview stage — ${jt}`,
+        html: intro(
+          `<p>Your application for <strong>${jt}</strong> has moved to the <strong>interview</strong> stage.</p>`
+        ),
+      };
+    case "shortlisted":
+      return {
+        subject: `Shortlisted for ${jt}`,
+        html: intro(
+          `<p>You have been <strong>shortlisted</strong> for <strong>${jt}</strong>.</p>`
+        ),
+      };
+    case "offer":
+      return {
+        subject: `Update on ${jt}`,
+        html: intro(
+          `<p>There is an update on your application for <strong>${jt}</strong> (status: <strong>offer / next steps</strong>).</p>`
+        ),
+      };
+    case "rejected":
+      return {
+        subject: `Update on your application for ${jt}`,
+        html: intro(
+          `<p>Thank you for applying to <strong>${jt}</strong>. The employer will not be moving forward with this application at this time.</p>`
+        ),
+      };
+    case "pending":
+      return {
+        subject: `Application reset — ${jt}`,
+        html: intro(
+          `<p>Your application for <strong>${jt}</strong> was set back to <strong>submitted</strong> for further review.</p>`
+        ),
+      };
+    default:
+      return {
+        subject: `Application update: ${jt}`,
+        html: intro(
+          `<p>Your application for <strong>${jt}</strong> has a new status: <strong>${escapeHtml(status)}</strong>.</p>`
+        ),
+      };
+  }
+}
+
+app.post("/api/applications/update-status", async (req, res) => {
+  const { applicationId, status, notes, employerUserId } = req.body;
+
+  if (!applicationId || !status || !employerUserId) {
+    return res.status(400).json({
+      error: "Missing applicationId, status, or employerUserId",
+    });
   }
 
+  if (!APPLICATION_STATUS_WHITELIST.has(String(status))) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  const notesStr = typeof notes === "string" ? notes : "";
+
   try {
+    const { data: before, error: fetchErr } = await supabaseAdmin
+      .from("applications")
+      .select(
+        `
+        id,
+        user_id,
+        job_id,
+        status,
+        notes,
+        jobs!inner ( id, title, posted_by )
+      `
+      )
+      .eq("id", applicationId)
+      .single();
+
+    if (fetchErr || !before) {
+      return res.status(404).json({ error: "Application not found" });
+    }
+
+    let jobRow = (before as any).jobs;
+    if (Array.isArray(jobRow)) jobRow = jobRow[0];
+    if (!jobRow || jobRow.posted_by !== employerUserId) {
+      return res.status(403).json({ error: "Not allowed to update this application" });
+    }
+
+    const prevStatus = String((before as any).status || "pending");
+    const prevNotes = String((before as any).notes ?? "");
+    if (prevStatus === String(status) && prevNotes === notesStr) {
+      return res.json({ success: true, unchanged: true });
+    }
+
     const { data: application, error: updateError } = await supabaseAdmin
       .from("applications")
-      .update({ status, notes })
+      .update({ status, notes: notesStr || null })
       .eq("id", applicationId)
       .select(
         `
         *,
-        jobs (title),
+        jobs (id, title),
         profiles:user_id (full_name, email)
       `
       )
@@ -430,39 +563,32 @@ app.post("/api/applications/update-status", async (req, res) => {
     const applicant = (application as any).profiles;
     const job = (application as any).jobs;
 
-    let subject = "";
-    let html = "";
+    const { subject, html } = statusEmailCopy(
+      status,
+      job.title,
+      applicant?.full_name || "there",
+      notesStr
+    );
 
-    if (status === "shortlisted") {
-      subject = `Great news: You've been shortlisted for ${job.title}`;
-      html = `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-          <h2 style="color: #10b981;">Great news, ${applicant.full_name}!</h2>
-          <p>The employer for <strong>'${job.title}'</strong> has shortlisted you.</p>
-          ${notes ? `<p><strong>Employer note:</strong> ${notes}</p>` : ""}
-          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
-          <p style="color: #666; font-size: 12px;">Thank you for using JobToken.</p>
-        </div>
-      `;
-    } else if (status === "rejected") {
-      subject = `Update on your application for ${job.title}`;
-      html = `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-          <p>Hi ${applicant.full_name},</p>
-          <p>Thank you for applying to <strong>'${job.title}'</strong>. The employer has decided to move forward with other candidates at this time.</p>
-          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
-          <p style="color: #666; font-size: 12px;">Thank you for using JobToken.</p>
-        </div>
-      `;
-    }
-
-    if (subject && html) {
+    if (applicant?.email) {
       await sendMail({
         to: applicant.email,
         subject,
         html,
       });
     }
+
+    await supabaseAdmin.from("notifications").insert({
+      user_id: (application as any).user_id,
+      type: "application_status",
+      payload: {
+        application_id: applicationId,
+        job_id: job.id,
+        job_title: job.title,
+        status,
+        notes: notesStr || null,
+      },
+    });
 
     res.json({ success: true });
   } catch (error: any) {
@@ -473,7 +599,7 @@ app.post("/api/applications/update-status", async (req, res) => {
 
 // --- Employer job posting (fees + featured) ---
 app.post("/api/employer/post-job", async (req, res) => {
-  const { userId, title, description, job_type, token_cost, is_featured } = req.body;
+  const { userId, title, description, job_type, token_cost, is_featured, closes_at } = req.body;
 
   if (!userId || !title || !description || !job_type) {
     return res.status(400).json({ error: "Missing required fields" });
@@ -523,6 +649,14 @@ app.post("/api/employer/post-job", async (req, res) => {
       if (ti) throw ti;
     }
 
+    const closesAt =
+      closes_at && String(closes_at).trim()
+        ? new Date(String(closes_at)).toISOString()
+        : null;
+    if (closesAt && Number.isNaN(Date.parse(closesAt))) {
+      return res.status(400).json({ error: "Invalid closes_at date" });
+    }
+
     const { data: job, error: insErr } = await supabaseAdmin
       .from("jobs")
       .insert({
@@ -532,6 +666,7 @@ app.post("/api/employer/post-job", async (req, res) => {
         token_cost: Number(token_cost) || 1,
         posted_by: userId,
         is_featured: featured,
+        closes_at: closesAt,
       })
       .select()
       .single();
@@ -541,6 +676,65 @@ app.post("/api/employer/post-job", async (req, res) => {
     res.json({ success: true, job });
   } catch (error: any) {
     console.error("post-job:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/employer/update-job", async (req, res) => {
+  const { userId, jobId, title, description, job_type, token_cost, is_featured, closes_at } =
+    req.body;
+
+  if (!userId || !jobId || !title || !description || !job_type) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    const { data: existing, error: exErr } = await supabaseAdmin
+      .from("jobs")
+      .select("id, posted_by")
+      .eq("id", jobId)
+      .single();
+
+    if (exErr || !existing) {
+      return res.status(404).json({ error: "Job not found" });
+    }
+    if (existing.posted_by !== userId) {
+      return res.status(403).json({ error: "You can only edit your own jobs" });
+    }
+
+    const updatePayload: Record<string, unknown> = {
+      title,
+      description,
+      job_type,
+      token_cost: Number(token_cost) || 1,
+      is_featured: Boolean(is_featured),
+    };
+
+    if (closes_at !== undefined) {
+      if (closes_at === null || closes_at === "") {
+        updatePayload.closes_at = null;
+      } else {
+        const d = new Date(String(closes_at));
+        if (Number.isNaN(d.getTime())) {
+          return res.status(400).json({ error: "Invalid closes_at date" });
+        }
+        updatePayload.closes_at = d.toISOString();
+      }
+    }
+
+    const { data: job, error: upErr } = await supabaseAdmin
+      .from("jobs")
+      .update(updatePayload)
+      .eq("id", jobId)
+      .eq("posted_by", userId)
+      .select()
+      .single();
+
+    if (upErr) throw upErr;
+
+    res.json({ success: true, job });
+  } catch (error: any) {
+    console.error("update-job:", error);
     res.status(500).json({ error: error.message });
   }
 });

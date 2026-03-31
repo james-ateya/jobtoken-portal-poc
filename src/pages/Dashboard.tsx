@@ -4,15 +4,34 @@ import { supabase } from "../lib/supabase";
 import { WalletDashboard } from "../components/WalletDashboard";
 import { ApplicationThread } from "../components/ApplicationThread";
 import { motion } from "motion/react";
-import { History, Briefcase, CheckCircle, Clock, AlertCircle, Loader2, XCircle, ChevronDown, ChevronUp, UserCircle } from "lucide-react";
+import {
+  History,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  Loader2,
+  XCircle,
+  ChevronDown,
+  ChevronUp,
+  UserCircle,
+  ClipboardList,
+  MessageSquareText,
+  Bell,
+  Sparkles,
+} from "lucide-react";
 import { cn } from "../lib/utils";
+import { applicationStatusLabel, applicationStatusTone } from "../lib/applicationStatus";
 
 interface UserApplication {
   id: string;
   status: string;
+  notes: string | null;
   created_at: string;
+  updated_at?: string | null;
   job: {
+    id?: string;
     title: string;
+    job_type?: string | null;
   };
 }
 
@@ -23,14 +42,46 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
   const [stats, setStats] = useState({ applications: 0, spent: 0 });
   const [applications, setApplications] = useState<UserApplication[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
+  const [statusAlerts, setStatusAlerts] = useState<
+    { id: string; created_at: string; payload: Record<string, unknown> }[]
+  >([]);
 
   useEffect(() => {
     if (user) {
       fetchWallet();
       fetchStats();
       fetchApplications();
+      fetchStatusAlerts();
     }
   }, [user]);
+
+  const fetchStatusAlerts = async () => {
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("id, created_at, payload")
+      .eq("user_id", user.id)
+      .eq("type", "application_status")
+      .order("created_at", { ascending: false })
+      .limit(8);
+    if (!error && data) setStatusAlerts(data as any);
+  };
+
+  function dashStatusIcon(status: string) {
+    if (status === "rejected") return { I: XCircle, ring: "bg-red-500/10 text-red-400" };
+    if (status === "offer") return { I: Sparkles, ring: "bg-amber-500/10 text-amber-300" };
+    if (["shortlisted", "qualified", "interview"].includes(status)) {
+      return { I: CheckCircle, ring: "bg-emerald-500/10 text-emerald-400" };
+    }
+    return { I: Clock, ring: "bg-slate-500/10 text-slate-300" };
+  }
+
+  function dashStatusPill(status: string) {
+    const tone = applicationStatusTone(status);
+    if (tone === "negative") return "bg-red-500/10 text-red-400 border-red-500/20";
+    if (tone === "positive") return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+    if (status === "reviewing") return "bg-slate-500/10 text-slate-300 border-slate-500/20";
+    return "bg-amber-500/10 text-amber-300 border-amber-500/20";
+  }
 
   const fetchApplications = async () => {
     setLoadingApps(true);
@@ -40,8 +91,14 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
         .select(`
           id,
           status,
+          notes,
           created_at,
-          job:job_id (title)
+          updated_at,
+          job:job_id (
+            id,
+            title,
+            job_type
+          )
         `)
         .eq("user_id", user.id)
         .order("created_at", { ascending: false });
@@ -105,6 +162,44 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
         </div>
 
         <div className="lg:col-span-8 space-y-8">
+          {statusAlerts.length > 0 ? (
+            <div className="p-5 rounded-2xl border border-white/10 bg-white/[0.02] space-y-3">
+              <div className="flex items-center gap-2 text-emerald-400">
+                <Bell className="w-4 h-4" />
+                <h3 className="text-sm font-bold">Application updates</h3>
+              </div>
+              <ul className="space-y-2">
+                {statusAlerts.map((n) => {
+                  const p = n.payload as {
+                    job_title?: string;
+                    status?: string;
+                  };
+                  return (
+                    <li
+                      key={n.id}
+                      className="text-xs text-zinc-400 border-l-2 border-emerald-500/30 pl-3 py-1"
+                    >
+                      <span className="text-zinc-200 font-medium">{p.job_title || "Job"}</span>
+                      {" → "}
+                      <span className="text-emerald-400/90">
+                        {applicationStatusLabel(p.status || "pending")}
+                      </span>
+                      <span className="text-zinc-600 ml-2">
+                        {new Date(n.created_at).toLocaleString()}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <Link
+                to="/dashboard/applications"
+                className="text-xs font-bold text-emerald-400 hover:text-emerald-300"
+              >
+                Open full history
+              </Link>
+            </div>
+          ) : null}
+
           <Link
             to="/dashboard/profile"
             className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-emerald-500/25 bg-emerald-500/5 hover:bg-emerald-500/10 transition-colors group"
@@ -161,9 +256,18 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
           </div>
 
           <div className="p-8 rounded-3xl border border-white/10 bg-white/[0.02]">
-            <div className="flex items-center gap-3 mb-6">
-              <Clock className="w-5 h-5 text-emerald-500" />
-              <h3 className="text-xl font-bold">My Applications</h3>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+              <div className="flex items-center gap-3">
+                <Clock className="w-5 h-5 text-emerald-500" />
+                <h3 className="text-xl font-bold">My Applications</h3>
+              </div>
+              <Link
+                to="/dashboard/applications"
+                className="inline-flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider px-4 py-2 rounded-xl border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+              >
+                <ClipboardList className="w-4 h-4" />
+                Full history and employer notes
+              </Link>
             </div>
             
             {loadingApps ? (
@@ -172,7 +276,10 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
               </div>
             ) : applications.length > 0 ? (
               <div className="space-y-4">
-                {applications.map((app) => (
+                {applications.map((app) => {
+                  const st = app.status || "pending";
+                  const { I: StatusIcon, ring } = dashStatusIcon(st);
+                  return (
                   <div
                     key={app.id}
                     className="rounded-2xl bg-white/5 border border-white/5 overflow-hidden"
@@ -182,40 +289,36 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
                         <div
                           className={cn(
                             "w-10 h-10 rounded-xl flex items-center justify-center",
-                            app.status === "shortlisted"
-                              ? "bg-emerald-500/10 text-emerald-400"
-                              : app.status === "rejected"
-                                ? "bg-red-500/10 text-red-400"
-                                : "bg-yellow-500/10 text-yellow-400"
+                            ring
                           )}
                         >
-                          {app.status === "shortlisted" ? (
-                            <CheckCircle className="w-5 h-5" />
-                          ) : app.status === "rejected" ? (
-                            <XCircle className="w-5 h-5" />
-                          ) : (
-                            <Clock className="w-5 h-5" />
-                          )}
+                          <StatusIcon className="w-5 h-5" />
                         </div>
-                        <div>
+                        <div className="min-w-0">
                           <p className="font-bold text-white">{app.job.title}</p>
                           <p className="text-xs text-zinc-500">
+                            {app.job.job_type ? `${app.job.job_type} · ` : ""}
                             {new Date(app.created_at).toLocaleDateString()}
                           </p>
+                          {(app.notes || "").trim() ? (
+                            <p className="text-xs text-emerald-400/90 mt-2 flex items-start gap-1.5 line-clamp-2">
+                              <MessageSquareText className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              <span>
+                                <span className="text-zinc-500 font-medium">Employer: </span>
+                                {(app.notes || "").trim()}
+                              </span>
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
                         <span
                           className={cn(
                             "text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md border",
-                            app.status === "shortlisted"
-                              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                              : app.status === "rejected"
-                                ? "bg-red-500/10 text-red-400 border-red-500/20"
-                                : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20"
+                            dashStatusPill(st)
                           )}
                         >
-                          {app.status || "pending"}
+                          {applicationStatusLabel(st)}
                         </span>
                         <button
                           type="button"
@@ -239,7 +342,8 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
                       </div>
                     )}
                   </div>
-                ))}
+                );
+                })}
               </div>
             ) : (
               <div className="text-center py-8">

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { JobCard } from "../components/JobCard";
 import { JobDetailModal } from "../components/JobDetailModal";
@@ -15,6 +15,7 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
   const [userApplications, setUserApplications] = useState<string[]>([]);
   const [detailJob, setDetailJob] = useState<any | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     fetchJobs();
@@ -23,6 +24,14 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
       fetchUserApplications(user.id);
     }
   }, [user]);
+
+  useEffect(() => {
+    const id = (location.state as { highlightJobId?: string } | null)?.highlightJobId;
+    if (!id || jobs.length === 0) return;
+    const j = jobs.find((x) => x.id === id);
+    if (j) setDetailJob(j);
+    navigate(".", { replace: true, state: {} });
+  }, [jobs, location.state, navigate]);
 
   const fetchJobs = async () => {
     let { data, error } = await supabase
@@ -37,7 +46,13 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
         .order("created_at", { ascending: false });
       data = fallback.data;
     }
-    if (data) setJobs(data);
+    if (data) {
+      const active = data.filter(
+        (j: { closes_at?: string | null }) =>
+          !j.closes_at || new Date(j.closes_at) > new Date()
+      );
+      setJobs(active);
+    }
   };
 
   const fetchUserApplications = async (userId: string) => {

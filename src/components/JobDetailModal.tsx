@@ -11,6 +11,7 @@ export type JobDetail = {
   token_cost: number;
   is_featured?: boolean;
   created_at?: string;
+  closes_at?: string | null;
 };
 
 type JobDetailModalProps = {
@@ -30,6 +31,9 @@ export function JobDetailModal({
   hasApplied,
   hideApply,
 }: JobDetailModalProps) {
+  const listingClosed =
+    job?.closes_at != null && job.closes_at !== "" && new Date(job.closes_at) <= new Date();
+
   useEffect(() => {
     if (!job) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -98,7 +102,26 @@ export function JobDetailModal({
                     Posted {new Date(job.created_at).toLocaleDateString()}
                   </span>
                 )}
+                {job.closes_at && (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1.5 text-xs",
+                      listingClosed ? "text-red-400" : "text-zinc-400"
+                    )}
+                  >
+                    <Calendar className="w-4 h-4" />
+                    {listingClosed
+                      ? "Listing closed"
+                      : `Accepting applications until ${new Date(job.closes_at).toLocaleString()}`}
+                  </span>
+                )}
               </div>
+
+              {listingClosed && (
+                <p className="mt-4 text-sm text-red-400/90 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
+                  This job is no longer accepting applications.
+                </p>
+              )}
 
               <div className="mt-6 border-t border-white/10 pt-6">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500 mb-3">
@@ -114,17 +137,25 @@ export function JobDetailModal({
                   <button
                     type="button"
                     onClick={() => onApply(job.id)}
-                    disabled={isApplying || hasApplied}
+                    disabled={isApplying || hasApplied || listingClosed}
                     className={cn(
                       "flex-1 py-3.5 rounded-xl font-bold transition-all",
                       hasApplied
                         ? "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-white/5"
-                        : isApplying
-                          ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
-                          : "bg-emerald-500 text-black hover:bg-emerald-400 active:scale-[0.98]"
+                        : listingClosed
+                          ? "bg-zinc-800 text-zinc-600 cursor-not-allowed border border-white/5"
+                          : isApplying
+                            ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+                            : "bg-emerald-500 text-black hover:bg-emerald-400 active:scale-[0.98]"
                     )}
                   >
-                    {hasApplied ? "Applied" : isApplying ? "Applying…" : "Apply now"}
+                    {hasApplied
+                      ? "Applied"
+                      : listingClosed
+                        ? "Closed to applications"
+                        : isApplying
+                          ? "Applying…"
+                          : "Apply now"}
                   </button>
                   <button
                     type="button"

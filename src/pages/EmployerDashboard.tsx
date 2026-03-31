@@ -12,6 +12,8 @@ import {
   Send,
   Bell,
   Star,
+  Pencil,
+  CalendarClock,
 } from "lucide-react";
 import { ApplicationThread } from "../components/ApplicationThread";
 import { cn } from "../lib/utils";
@@ -24,6 +26,12 @@ interface Job {
   token_cost: number;
   created_at: string;
   applications_count?: number;
+  is_featured?: boolean;
+  closes_at?: string | null;
+}
+
+function jobListingExpired(job: Job) {
+  return !!(job.closes_at && new Date(job.closes_at) <= new Date());
 }
 
 interface Applicant {
@@ -43,18 +51,20 @@ interface Applicant {
 export function EmployerDashboard({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showPostForm, setShowPostForm] = useState(false);
+  const [jobFormOpen, setJobFormOpen] = useState(false);
+  const [jobFormMode, setJobFormMode] = useState<"create" | "edit">("create");
+  const [editingJobId, setEditingJobId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [applicants, setApplicants] = useState<Applicant[]>([]);
   const [loadingApplicants, setLoadingApplicants] = useState(false);
 
-  // Form State
-  const [newJob, setNewJob] = useState({
+  const [jobForm, setJobForm] = useState({
     title: "",
     description: "",
     job_type: "",
     token_cost: 1,
     is_featured: false,
+    closes_at: "",
   });
   const [posting, setPosting] = useState(false);
   const [employerTokens, setEmployerTokens] = useState<number | null>(null);
@@ -178,43 +188,97 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     }
   };
 
-  const handlePostJob = async (e: React.FormEvent) => {
+  const closeJobForm = () => {
+    setJobFormOpen(false);
+    setEditingJobId(null);
+    setJobFormMode("create");
+  };
+
+  const openCreateJobForm = () => {
+    setJobFormMode("create");
+    setEditingJobId(null);
+    setJobForm({
+      title: "",
+      description: "",
+      job_type: "",
+      token_cost: 1,
+      is_featured: false,
+      closes_at: "",
+    });
+    setJobFormOpen(true);
+  };
+
+  const openEditJobForm = (job: Job) => {
+    setJobFormMode("edit");
+    setEditingJobId(job.id);
+    const ca = job.closes_at
+      ? new Date(job.closes_at).toISOString().slice(0, 16)
+      : "";
+    setJobForm({
+      title: job.title,
+      description: job.description,
+      job_type: job.job_type,
+      token_cost: job.token_cost,
+      is_featured: !!job.is_featured,
+      closes_at: ca,
+    });
+    setJobFormOpen(true);
+  };
+
+  const handleJobFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!newJob.job_type) {
+
+    if (!jobForm.job_type) {
       showToast("Please select a job type", "error");
       return;
     }
 
     setPosting(true);
     try {
-      const response = await fetch("/api/employer/post-job", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: user.id,
-          title: newJob.title,
-          description: newJob.description,
-          job_type: newJob.job_type,
-          token_cost: newJob.token_cost,
-          is_featured: newJob.is_featured,
-        }),
-      });
+      if (jobFormMode === "create") {
+        const response = await fetch("/api/employer/post-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId: user.id,
+            title: jobForm.title,
+            description: jobForm.description,
+            job_type: jobForm.job_type,
+            token_cost: jobForm.token_cost,
+            is_featured: jobForm.is_featured,
+            closes_at: jobForm.closes_at || null,
+          }),
+        });
 
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Failed to post job");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Failed to post job");
 
-      showToast("Job posted successfully!");
-      setShowPostForm(false);
-      setNewJob({
-        title: "",
-        description: "",
-        job_type: "",
-        token_cost: 1,
-        is_featured: false,
-      });
+        showToast("Job posted successfully!");
+        fetchEmployerWallet();
+      } else if (editingJobId) {
+        const response = await fetch("/api/employer/update-job", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId: user.id,
+            jobId: editingJobId,
+            title: jobForm.title,
+            description: jobForm.description,
+            job_type: jobForm.job_type,
+            token_cost: jobForm.token_cost,
+            is_featured: jobForm.is_featured,
+            closes_at: jobForm.closes_at || null,
+          }),
+        });
+
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Failed to update job");
+
+        showToast("Job updated successfully!");
+      }
+
+      closeJobForm();
       fetchEmployerJobs();
-      fetchEmployerWallet();
     } catch (error: any) {
       showToast(error.message, "error");
     } finally {
@@ -249,7 +313,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             </p>
           )}
         </div>
-        {!selectedJob && !showPostForm && (
+        {!selectedJob && !jobFormOpen && (
           <div className="flex flex-wrap items-center gap-3">
             <div className="relative">
               <button
@@ -305,7 +369,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             </Link>
             <button
               type="button"
-              onClick={() => setShowPostForm(true)}
+              onClick={() => openCreateJobForm()}
               className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500 text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98]"
             >
               <Plus className="w-5 h-5" />
@@ -316,7 +380,7 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
       </div>
 
       <AnimatePresence mode="wait">
-        {showPostForm ? (
+        {jobFormOpen ? (
           <motion.div
             key="post-form"
             initial={{ opacity: 0, y: 20 }}
@@ -325,23 +389,29 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
             className="max-w-2xl mx-auto"
           >
             <div className="mb-8 flex items-center gap-4">
-              <button 
-                onClick={() => setShowPostForm(false)}
+              <button
+                type="button"
+                onClick={() => closeJobForm()}
                 className="p-2 rounded-full hover:bg-white/5 text-zinc-400 transition-colors"
               >
                 <ArrowLeft className="w-6 h-6" />
               </button>
-              <h2 className="text-2xl font-bold">Post a New Job</h2>
+              <h2 className="text-2xl font-bold">
+                {jobFormMode === "create" ? "Post a New Job" : "Edit job listing"}
+              </h2>
             </div>
 
-            <form onSubmit={handlePostJob} className="space-y-6 p-8 rounded-3xl border border-white/10 bg-white/[0.02] backdrop-blur-xl">
+            <form
+              onSubmit={handleJobFormSubmit}
+              className="space-y-6 p-8 rounded-3xl border border-white/10 bg-white/[0.02] backdrop-blur-xl"
+            >
               <div className="space-y-2">
                 <label className="text-sm font-medium text-zinc-400 ml-1">Job Title</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   required
-                  value={newJob.title}
-                  onChange={(e) => setNewJob({...newJob, title: e.target.value})}
+                  value={jobForm.title}
+                  onChange={(e) => setJobForm({ ...jobForm, title: e.target.value })}
                   className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
                   placeholder="e.g. Senior React Developer"
                 />
@@ -349,11 +419,11 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
 
               <div className="space-y-2">
                 <label className="text-sm font-medium text-zinc-400 ml-1">Description</label>
-                <textarea 
+                <textarea
                   required
                   rows={5}
-                  value={newJob.description}
-                  onChange={(e) => setNewJob({...newJob, description: e.target.value})}
+                  value={jobForm.description}
+                  onChange={(e) => setJobForm({ ...jobForm, description: e.target.value })}
                   className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors resize-none"
                   placeholder="Describe the role, requirements, and benefits..."
                 />
@@ -362,13 +432,15 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-zinc-400 ml-1">Job Type</label>
-                  <select 
+                  <select
                     required
-                    value={newJob.job_type}
-                    onChange={(e) => setNewJob({...newJob, job_type: e.target.value})}
+                    value={jobForm.job_type}
+                    onChange={(e) => setJobForm({ ...jobForm, job_type: e.target.value })}
                     className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors appearance-none"
                   >
-                    <option value="" disabled>Select Type</option>
+                    <option value="" disabled>
+                      Select Type
+                    </option>
                     <option value="Remote">Remote</option>
                     <option value="Onsite">Onsite</option>
                     <option value="Online">Online</option>
@@ -377,22 +449,41 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
 
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-zinc-400 ml-1">Token Cost (to apply)</label>
-                  <input 
-                    type="number" 
+                  <input
+                    type="number"
                     min="1"
                     required
-                    value={newJob.token_cost}
-                    onChange={(e) => setNewJob({...newJob, token_cost: parseInt(e.target.value, 10) || 1})}
+                    value={jobForm.token_cost}
+                    onChange={(e) =>
+                      setJobForm({ ...jobForm, token_cost: parseInt(e.target.value, 10) || 1 })
+                    }
                     className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
                   />
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-zinc-400 ml-1 flex items-center gap-2">
+                  <CalendarClock className="w-4 h-4 text-zinc-500" />
+                  Listing closes (optional)
+                </label>
+                <input
+                  type="datetime-local"
+                  value={jobForm.closes_at}
+                  onChange={(e) => setJobForm({ ...jobForm, closes_at: e.target.value })}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
+                />
+                <p className="text-xs text-zinc-500">
+                  After this time the job is hidden from the public board and seekers can no longer
+                  apply. Leave empty for no automatic closing.
+                </p>
+              </div>
+
               <label className="flex items-start gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={newJob.is_featured}
-                  onChange={(e) => setNewJob({ ...newJob, is_featured: e.target.checked })}
+                  checked={jobForm.is_featured}
+                  onChange={(e) => setJobForm({ ...jobForm, is_featured: e.target.checked })}
                   className="mt-1 rounded border-white/20"
                 />
                 <div>
@@ -401,8 +492,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     Featured listing
                   </span>
                   <p className="text-xs text-zinc-500 mt-1">
-                    Higher visibility on the job board. Charges extra employer tokens (see{" "}
-                    <code className="text-zinc-400">FEATURE_JOB_TOKENS</code> on the server).
+                    Higher visibility on the job board. Extra tokens apply when posting a new job (
+                    <code className="text-zinc-400">FEATURE_JOB_TOKENS</code>).
                   </p>
                 </div>
               </label>
@@ -412,8 +503,12 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                 disabled={posting}
                 className="w-full py-4 bg-emerald-500 text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
               >
-                {posting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-                Publish Job Listing
+                {posting ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5" />
+                )}
+                {jobFormMode === "create" ? "Publish Job Listing" : "Save changes"}
               </button>
             </form>
           </motion.div>
@@ -502,13 +597,38 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                     key={job.id} 
                     className="p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.08] transition-all group"
                   >
-                    <div className="flex justify-between items-start mb-6">
-                      <div>
-                        <h3 className="text-xl font-bold text-white group-hover:text-emerald-400 transition-colors">{job.title}</h3>
-                        <p className="text-zinc-500 text-xs mt-1">Posted on {new Date(job.created_at).toLocaleDateString()}</p>
+                    <div className="flex justify-between items-start mb-6 gap-3">
+                      <div className="min-w-0">
+                        <h3 className="text-xl font-bold text-white group-hover:text-emerald-400 transition-colors">
+                          {job.title}
+                        </h3>
+                        <p className="text-zinc-500 text-xs mt-1">
+                          Posted on {new Date(job.created_at).toLocaleDateString()}
+                          {job.closes_at ? (
+                            <>
+                              {" "}
+                              · Closes {new Date(job.closes_at).toLocaleString()}
+                            </>
+                          ) : null}
+                        </p>
+                        {jobListingExpired(job) ? (
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-red-400 mt-2">
+                            Listing expired — not visible to seekers
+                          </p>
+                        ) : null}
                       </div>
-                      <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
-                        {job.job_type}
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+                          {job.job_type}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => openEditJobForm(job)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:bg-white/10"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          Edit
+                        </button>
                       </div>
                     </div>
 

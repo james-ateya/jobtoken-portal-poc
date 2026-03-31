@@ -9,9 +9,10 @@ import { EmployerDashboard } from "./pages/EmployerDashboard";
 import { EmployerApplicationsPage } from "./pages/EmployerApplications";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
+import { SeekerApplicationsPage } from "./pages/SeekerApplications";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { motion, AnimatePresence } from "motion/react";
-import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle } from "lucide-react";
+import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList } from "lucide-react";
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -109,13 +110,22 @@ export default function App() {
                     {userRole === 'employer' ? "Employer Portal" : userRole === 'admin' ? "Admin Portal" : "Dashboard"}
                   </Link>
                   {userRole === "seeker" && (
-                    <Link
-                      to="/dashboard/profile"
-                      className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
-                    >
-                      <UserCircle className="w-4 h-4" />
-                      My profile
-                    </Link>
+                    <>
+                      <Link
+                        to="/dashboard/applications"
+                        className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <ClipboardList className="w-4 h-4" />
+                        My applications
+                      </Link>
+                      <Link
+                        to="/dashboard/profile"
+                        className="text-sm font-medium text-zinc-400 hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <UserCircle className="w-4 h-4" />
+                        My profile
+                      </Link>
+                    </>
                   )}
                   {userRole === 'employer' && (
                     <Link 
@@ -186,6 +196,31 @@ export default function App() {
                       className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
                     >
                       Back to jobs
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/applications"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "seeker" ? (
+                  <SeekerApplicationsPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <ClipboardList className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Seekers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Application history is for job seekers. Open your employer portal to review
+                      candidates.
+                    </p>
+                    <Link
+                      to={userRole === "employer" ? "/dashboard/employer" : "/dashboard"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to dashboard
                     </Link>
                   </div>
                 )}
