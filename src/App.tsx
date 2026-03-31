@@ -3,6 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from "react
 import { supabase } from "./lib/supabase";
 import { HomePage } from "./pages/Home";
 import { LoginPage } from "./pages/Login";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SignupPage } from "./pages/Signup";
 import { DashboardPage } from "./pages/Dashboard";
 import { EmployerDashboard } from "./pages/EmployerDashboard";
@@ -217,6 +219,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage user={user} showToast={showToast} />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/signup" element={<SignupPage />} />
           <Route
             path="/dashboard/profile"
