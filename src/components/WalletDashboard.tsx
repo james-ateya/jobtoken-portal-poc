@@ -46,6 +46,10 @@ export function WalletDashboard({
     { kes: 500, tokens: 35 },
   ]);
   const [selectedKes, setSelectedKes] = useState(100);
+  const [customAmount, setCustomAmount] = useState("");
+  const [kesPerToken, setKesPerToken] = useState(20);
+  const [minTopupKes, setMinTopupKes] = useState(1);
+  const [maxTopupKes, setMaxTopupKes] = useState(150000);
   const [phone, setPhone] = useState("");
   const [stkLoading, setStkLoading] = useState(false);
   const [stkHint, setStkHint] = useState<string | null>(null);
@@ -68,6 +72,11 @@ export function WalletDashboard({
           setPacks(d.packs);
           setSelectedKes(d.packs[0].kes);
         }
+        if (typeof d.kesPerToken === "number" && d.kesPerToken > 0) {
+          setKesPerToken(d.kesPerToken);
+        }
+        if (typeof d.minTopupKes === "number") setMinTopupKes(d.minTopupKes);
+        if (typeof d.maxTopupKes === "number") setMaxTopupKes(d.maxTopupKes);
       })
       .catch(() => {});
   }, []);
@@ -132,13 +141,31 @@ export function WalletDashboard({
     setStkLoading(true);
     setStkHint(null);
     try {
+      const custom = customAmount.trim();
+      let amountKes: number;
+      if (custom !== "") {
+        amountKes = Math.round(Number(custom));
+        if (!Number.isFinite(amountKes)) {
+          setStkHint("Enter a valid amount in Ksh.");
+          setStkLoading(false);
+          return;
+        }
+        if (amountKes < minTopupKes || amountKes > maxTopupKes) {
+          setStkHint(`Amount must be between Ksh ${minTopupKes} and Ksh ${maxTopupKes}.`);
+          setStkLoading(false);
+          return;
+        }
+      } else {
+        amountKes = selectedPack?.kes ?? selectedKes;
+      }
+
       const res = await fetch("/api/mpesa/stk-push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
           phoneNumber: phone,
-          packKes: selectedKes,
+          amountKes,
         }),
       });
       const json = await res.json();
@@ -176,6 +203,26 @@ export function WalletDashboard({
   };
 
   const selectedPack = packs.find((p) => p.kes === selectedKes) || packs[0];
+
+  const customTrimmed = customAmount.trim();
+  let customParsed: number | null = null;
+  if (customTrimmed !== "") {
+    const n = Math.round(Number(customTrimmed));
+    customParsed = Number.isFinite(n) ? n : null;
+  }
+  const customActive =
+    customTrimmed !== "" &&
+    customParsed != null &&
+    customParsed >= minTopupKes &&
+    customParsed <= maxTopupKes;
+  const effectiveKes = customActive
+    ? customParsed!
+    : selectedPack?.kes ?? selectedKes;
+  const previewTokens = (() => {
+    const p = packs.find((x) => x.kes === effectiveKes);
+    if (p) return p.tokens;
+    return Math.floor(effectiveKes / kesPerToken);
+  })();
 
   return (
     <div className="p-8 rounded-3xl border border-white/10 bg-gradient-to-br from-zinc-900 to-black shadow-2xl relative overflow-hidden min-h-[400px]">
@@ -282,10 +329,13 @@ export function WalletDashboard({
                     <button
                       key={p.kes}
                       type="button"
-                      onClick={() => setSelectedKes(p.kes)}
+                      onClick={() => {
+                        setSelectedKes(p.kes);
+                        setCustomAmount("");
+                      }}
                       className={cn(
                         "py-3 px-2 rounded-xl border text-center transition-all",
-                        selectedKes === p.kes
+                        customAmount.trim() === "" && selectedKes === p.kes
                           ? "border-emerald-500 bg-emerald-500/10 text-emerald-400"
                           : "border-white/10 bg-white/5 text-zinc-400 hover:border-white/20"
                       )}
@@ -294,6 +344,50 @@ export function WalletDashboard({
                       <span className="text-[10px] text-zinc-500">{p.tokens} tokens</span>
                     </button>
                   ))}
+                </div>
+
+                <div className="space-y-2 pt-2 border-t border-white/10">
+                  <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest block">
+                    Or enter amount (Ksh)
+                  </label>
+                  <p className="text-[11px] text-zinc-600 leading-snug">
+                    If you type an amount here, it is used instead of a pack. Tokens = pack match if
+                    exact, otherwise floor(amount ÷ {kesPerToken}) (min Ksh {minTopupKes}).
+                  </p>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={minTopupKes}
+                    max={maxTopupKes}
+                    step={1}
+                    placeholder={`e.g. 150 (${minTopupKes}–${maxTopupKes})`}
+                    value={customAmount}
+                    onChange={(e) => setCustomAmount(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50"
+                  />
+                  {customTrimmed !== "" && (
+                    <p className="text-xs text-zinc-400">
+                      {customParsed == null ? (
+                        <span className="text-red-400/90">Enter a valid whole number (Ksh).</span>
+                      ) : customParsed < minTopupKes || customParsed > maxTopupKes ? (
+                        <span className="text-red-400/90">
+                          Use between Ksh {minTopupKes} and Ksh {maxTopupKes}.
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-emerald-500/90">
+                            Paying Ksh {effectiveKes} → <strong>{previewTokens}</strong> tokens
+                          </span>
+                          {previewTokens < 1 && (
+                            <span className="text-red-400/90">
+                              {" "}
+                              (min Ksh {Math.ceil(kesPerToken)} for 1 token)
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
 
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest block">
@@ -315,7 +409,11 @@ export function WalletDashboard({
               <button
                 type="button"
                 onClick={handleStkTopup}
-                disabled={stkLoading || !phone.trim()}
+                disabled={
+                  stkLoading ||
+                  !phone.trim() ||
+                  (customActive && previewTokens < 1)
+                }
                 className="w-full flex items-center justify-center gap-2 py-4 bg-emerald-500 text-black rounded-2xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98] disabled:opacity-50 shadow-[0_0_20px_rgba(16,185,129,0.2)]"
               >
                 {stkLoading ? (
@@ -323,7 +421,7 @@ export function WalletDashboard({
                 ) : (
                   <Plus className="w-5 h-5" />
                 )}
-                Pay Ksh {selectedPack?.kes ?? selectedKes} via M-Pesa
+                Pay Ksh {effectiveKes} via M-Pesa
               </button>
 
               {allowSimulate && (

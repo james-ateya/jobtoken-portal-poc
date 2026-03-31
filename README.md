@@ -53,10 +53,11 @@ Full-stack job board: React (Vite), Express, Supabase (Postgres + Auth), M-Pesa 
 ## M-Pesa STK Push
 
 1. Register a Daraja app and obtain consumer key/secret, Lipa Na M-Pesa Online shortcode and passkey.
-2. Set `MPESA_CALLBACK_URL` to your **public** HTTPS URL ending in `/api/mpesa/callback` (e.g. Vercel deployment).
+2. Set `MPESA_CALLBACK_URL` to your **public** HTTPS URL ending in `/api/mpesa/callback` (e.g. Vercel deployment). If you omit it but **`APP_URL`** is a public `https://…` URL (not localhost), the server uses `APP_URL/api/mpesa/callback`.
 3. Configure sandbox or production base URL (`MPESA_BASE_URL` or `MPESA_ENV`).
+4. The API loads `.env` / `.env.local` from the project root (UTF-8 BOM is stripped). Restart the dev server after edits. Optional: duplicate keys as `VITE_MPESA_*` are also read by the Express server.
 
-Token packs default to Ksh 100 → 5 tokens, 200 → 12, 500 → 35. Override with `TOKEN_PACKS_JSON` (JSON array of `{ "kes", "tokens" }`).
+Token packs default to Ksh 100 → 5 tokens, 200 → 12, 500 → 35. Override with `TOKEN_PACKS_JSON` (JSON array of `{ "kes", "tokens" }`). Users can also type **any** top-up amount in the wallet; tokens use the same pack if the amount matches exactly, otherwise `floor(amount / MPESA_KES_PER_TOKEN)` (default Ksh 20 per token). Bounds: `MPESA_MIN_TOPUP_KES`, `MPESA_MAX_TOPUP_KES`.
 
 ## Local simulated top-up (no M-Pesa)
 
@@ -74,7 +75,7 @@ Employers need a `wallets` row with enough balance (e.g. after admin grant or fu
 
 ## Deployment (Vercel)
 
-Add the same variables as in `.env.example` (Supabase, **Resend** and/or SMTP, M-Pesa, `APP_URL` = production site URL). Routes under `/api/*` are handled by `server/index.ts` per `vercel.json`.
+Add the same variables as in `.env.example` (Supabase, **Resend** and/or SMTP, M-Pesa, `APP_URL` = production site URL). Routes under `/api/*` are handled by `server/index.ts` (Vercel entry) and `server/app.ts` (Express app) per `vercel.json`. Local dev uses `server/dev-server.ts`.
 
 ## Troubleshooting
 

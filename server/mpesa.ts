@@ -29,6 +29,38 @@ export function findPackByKes(kes: number): TokenPack | undefined {
   return getTokenPacks().find((p) => p.kes === kes);
 }
 
+/** KES charged per 1 token for custom (non-pack) top-ups. Default 20 → 100 KES = 5 tokens. */
+export function getKesPerToken(): number {
+  const n = parseFloat(process.env.MPESA_KES_PER_TOKEN || "20");
+  return Number.isFinite(n) && n > 0 ? n : 20;
+}
+
+export function tokensFromCustomKes(amountKes: number): number {
+  return Math.floor(amountKes / getKesPerToken());
+}
+
+export function getTopupKesBounds(): { min: number; max: number; kesPerToken: number } {
+  const kesPerToken = getKesPerToken();
+  const defaultMin = Math.max(1, Math.ceil(kesPerToken));
+  const min = Math.max(
+    1,
+    parseInt(process.env.MPESA_MIN_TOPUP_KES || String(defaultMin), 10) || defaultMin
+  );
+  const max = Math.max(
+    min,
+    parseInt(process.env.MPESA_MAX_TOPUP_KES || "150000", 10) || 150000
+  );
+  return { min, max, kesPerToken };
+}
+
+/** Tokens credited for this KES amount: pack bonus if exact match, else linear custom rate. */
+export function resolveTokensForTopupKes(amountKes: number): number {
+  const rounded = Math.round(amountKes);
+  const pack = findPackByKes(rounded);
+  if (pack) return pack.tokens;
+  return tokensFromCustomKes(rounded);
+}
+
 export function normalizeKenyaPhone(input: string): string {
   const digits = input.replace(/\D/g, "");
   if (digits.startsWith("254")) return digits;
@@ -53,10 +85,12 @@ async function getAccessToken(): Promise<string> {
   if (cachedToken && cachedToken.expiresAt > now + 60_000) {
     return cachedToken.value;
   }
-  const key = process.env.MPESA_CONSUMER_KEY;
-  const secret = process.env.MPESA_CONSUMER_SECRET;
+  const key = envFirst("MPESA_CONSUMER_KEY", "VITE_MPESA_CONSUMER_KEY");
+  const secret = envFirst("MPESA_CONSUMER_SECRET", "VITE_MPESA_CONSUMER_SECRET");
   if (!key || !secret) {
-    throw new Error("MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET are required");
+    throw new Error(
+      "MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET are required (or VITE_MPESA_* mirrors in .env)"
+    );
   }
   const auth = Buffer.from(`${key}:${secret}`).toString("base64");
   const res = await fetch(
@@ -110,15 +144,34 @@ function envTrim(key: string): string | undefined {
   return t.length ? t : undefined;
 }
 
+/** First non-empty env among alternate keys (e.g. MPESA_* or VITE_MPESA_* in .env). */
+function envFirst(...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = envTrim(k);
+    if (v) return v;
+  }
+  return undefined;
+}
+
 export async function initiateStkPush(params: {
   amountKes: number;
   phone254: string;
   accountReference: string;
   transactionDesc: string;
 }): Promise<StkInitResult> {
-  const shortcode = envTrim("MPESA_SHORTCODE");
-  const passkey = envTrim("MPESA_PASSKEY");
-  const callbackUrl = envTrim("MPESA_CALLBACK_URL");
+  const shortcode = envFirst("MPESA_SHORTCODE", "VITE_MPESA_SHORTCODE");
+  const passkey = envFirst("MPESA_PASSKEY", "VITE_MPESA_PASSKEY");
+  let callbackUrl = envFirst("MPESA_CALLBACK_URL", "VITE_MPESA_CALLBACK_URL");
+  if (!callbackUrl) {
+    const appUrl = envTrim("APP_URL");
+    if (
+      appUrl &&
+      /^https:\/\//i.test(appUrl) &&
+      !/localhost|127\.0\.0\.1/i.test(appUrl)
+    ) {
+      callbackUrl = `${appUrl.replace(/\/$/, "")}/api/mpesa/callback`;
+    }
+  }
   const missing: string[] = [];
   if (!shortcode) missing.push("MPESA_SHORTCODE");
   if (!passkey) missing.push("MPESA_PASSKEY");
