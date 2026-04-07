@@ -1,4 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  generateSixDigitOtp,
+  hashPasswordResetOtp,
+  normalizeEmail,
+} from "./password-reset-otp.js";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
@@ -553,6 +558,173 @@ function escapeHtml(s: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+const PASSWORD_RESET_OTP_TTL_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 5;
+const PASSWORD_RESET_MAX_OTP_ATTEMPTS = 5;
+
+/** Case-insensitive profile lookup by email (avoids eq mismatch when casing differs). */
+async function getProfileByEmailNormalized(emailNormalized: string) {
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, email")
+    .ilike("email", emailNormalized)
+    .maybeSingle();
+  if (error) throw error;
+  return data as { id: string; email: string | null } | null;
+}
+
+app.post("/api/auth/password-reset/request", async (req, res) => {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  if (!emailRaw) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+    return res.status(400).json({ error: "Invalid email address" });
+  }
+
+  const genericMessage =
+    "If an account exists for that email, you will receive a verification code shortly.";
+
+  try {
+    const profile = await getProfileByEmailNormalized(emailNormalized);
+    if (!profile) {
+      return res.json({ success: true, message: genericMessage });
+    }
+
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { count, error: cntErr } = await supabaseAdmin
+      .from("password_reset_otps")
+      .select("*", { count: "exact", head: true })
+      .eq("email_normalized", emailNormalized)
+      .gte("created_at", oneHourAgo);
+
+    if (cntErr) throw cntErr;
+    if ((count ?? 0) >= PASSWORD_RESET_MAX_REQUESTS_PER_HOUR) {
+      return res.status(429).json({
+        error: "Too many reset requests for this email. Try again in about an hour.",
+      });
+    }
+
+    const otp = generateSixDigitOtp();
+    const otpHash = hashPasswordResetOtp(otp, emailNormalized);
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MS).toISOString();
+
+    const { error: delErr } = await supabaseAdmin
+      .from("password_reset_otps")
+      .delete()
+      .eq("email_normalized", emailNormalized);
+    if (delErr) throw delErr;
+
+    const { error: insErr } = await supabaseAdmin.from("password_reset_otps").insert({
+      user_id: profile.id,
+      email_normalized: emailNormalized,
+      otp_hash: otpHash,
+      expires_at: expiresAt,
+      attempt_count: 0,
+    });
+    if (insErr) throw insErr;
+
+    const mailTo = (profile.email && profile.email.trim()) || emailNormalized;
+    const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+    const resetPageUrl = `${appUrl}/reset-password`;
+
+    await sendMail({
+      to: mailTo,
+      subject: "Your JobToken password reset code",
+      html: `
+        <div style="font-family: system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
+          <h1 style="font-size: 20px; color: #059669;">Password reset</h1>
+          <p>Use this code to set a new password (expires in 15 minutes):</p>
+          <p style="font-size: 28px; font-weight: bold; letter-spacing: 0.25em; font-family: ui-monospace, monospace;">${escapeHtml(otp)}</p>
+          <p>Open the reset page, enter your email, this code, and your new password:</p>
+          <p><a href="${escapeHtml(resetPageUrl)}" style="color: #059669;">${escapeHtml(resetPageUrl)}</a></p>
+          <p style="font-size: 13px; color: #71717a;">If you did not request this, you can ignore this email.</p>
+        </div>
+      `,
+    });
+
+    return res.json({ success: true, message: genericMessage });
+  } catch (error: any) {
+    console.error("password-reset request:", error);
+    res.status(500).json({ error: error.message || "Failed to process request" });
+  }
+});
+
+app.post("/api/auth/password-reset/confirm", async (req, res) => {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  const otpRaw = asNonEmptyString(req.body?.otp);
+  const newPassword = asNonEmptyString(req.body?.newPassword);
+
+  if (!emailRaw || !otpRaw || !newPassword) {
+    return res.status(400).json({ error: "Email, code, and new password are required" });
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+  const otp = otpRaw.replace(/\s/g, "");
+
+  if (!/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Enter the 6-digit code from your email" });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: "Password must be at least 6 characters" });
+  }
+
+  try {
+    const { data: row, error: selErr } = await supabaseAdmin
+      .from("password_reset_otps")
+      .select("id, user_id, otp_hash, expires_at, attempt_count")
+      .eq("email_normalized", emailNormalized)
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (selErr) throw selErr;
+    if (!row) {
+      return res.status(400).json({
+        error: "Invalid or expired code. Request a new code from Forgot password.",
+      });
+    }
+
+    const rowTyped = row as { id: string; user_id: string; otp_hash: string; attempt_count: number };
+
+    if (rowTyped.attempt_count >= PASSWORD_RESET_MAX_OTP_ATTEMPTS) {
+      await supabaseAdmin.from("password_reset_otps").delete().eq("id", rowTyped.id);
+      return res.status(400).json({ error: "Too many incorrect attempts. Request a new code." });
+    }
+
+    const expectedHash = rowTyped.otp_hash;
+    const actualHash = hashPasswordResetOtp(otp, emailNormalized);
+
+    const a = Buffer.from(expectedHash, "hex");
+    const b = Buffer.from(actualHash, "hex");
+    const matches = a.length === b.length && timingSafeEqual(a, b);
+
+    if (!matches) {
+      await supabaseAdmin
+        .from("password_reset_otps")
+        .update({ attempt_count: rowTyped.attempt_count + 1 })
+        .eq("id", rowTyped.id);
+      return res.status(400).json({ error: "Invalid code. Check the email and try again." });
+    }
+
+    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(rowTyped.user_id, {
+      password: newPassword,
+    });
+    if (authErr) throw authErr;
+
+    await supabaseAdmin.from("password_reset_otps").delete().eq("email_normalized", emailNormalized);
+
+    return res.json({
+      success: true,
+      message: "Password updated. You can sign in with your new password.",
+    });
+  } catch (error: any) {
+    console.error("password-reset confirm:", error);
+    res.status(500).json({ error: error.message || "Could not reset password" });
+  }
+});
 
 function statusEmailCopy(status: string, jobTitle: string, applicantName: string, notes: string) {
   const jt = escapeHtml(jobTitle);

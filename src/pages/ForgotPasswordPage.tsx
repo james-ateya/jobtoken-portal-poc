@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
-import { supabase } from "../lib/supabase";
+import { Link, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import { Mail, ArrowLeft, Loader2, KeyRound } from "lucide-react";
 
 export function ForgotPasswordPage() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -16,21 +16,18 @@ export function ForgotPasswordPage() {
     setError(null);
 
     try {
-      if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
-        throw new Error("Supabase is not configured.");
-      }
-
-      const redirectTo = `${window.location.origin}/reset-password`;
-
-      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-        redirectTo,
+      const res = await fetch("/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
       });
-
-      if (resetErr) throw resetErr;
-
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error("error" in data ? String(data.error) : "Could not send verification code.");
+      }
       setSent(true);
     } catch (err: any) {
-      setError(err.message || "Could not send reset email.");
+      setError(err.message || "Could not send verification code.");
     } finally {
       setLoading(false);
     }
@@ -49,7 +46,8 @@ export function ForgotPasswordPage() {
           </div>
           <h1 className="text-2xl font-bold">Forgot password</h1>
           <p className="text-zinc-500 text-sm mt-2">
-            Enter your email and we&apos;ll send you a link to choose a new password.
+            Enter your email and we&apos;ll send a 6-digit code. Use it on the next page to set a new
+            password.
           </p>
         </div>
 
@@ -57,9 +55,18 @@ export function ForgotPasswordPage() {
           <div className="space-y-6 text-center">
             <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm">
               If an account exists for <strong className="text-white">{email.trim()}</strong>, you
-              will receive an email with reset instructions shortly. Check your spam folder if you
-              don&apos;t see it.
+              will receive a verification code shortly. Check your spam folder if you don&apos;t see
+              it.
             </div>
+            <button
+              type="button"
+              onClick={() =>
+                navigate("/reset-password", { state: { email: email.trim() } })
+              }
+              className="w-full py-4 bg-white text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98]"
+            >
+              Enter code and new password
+            </button>
             <Link
               to="/login"
               className="inline-flex items-center gap-2 text-emerald-400 hover:text-emerald-300 font-medium text-sm"
@@ -97,7 +104,7 @@ export function ForgotPasswordPage() {
               disabled={loading}
               className="w-full py-4 bg-white text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-60"
             >
-              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Send reset link"}
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Send verification code"}
             </button>
           </form>
         )}

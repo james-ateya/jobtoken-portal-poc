@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { motion } from "motion/react";
 import { LogIn, Mail, Lock, ArrowRight, Loader2 } from "lucide-react";
@@ -12,6 +12,12 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [showResend, setShowResend] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
+  const passwordJustReset =
+    typeof location.state === "object" &&
+    location.state !== null &&
+    "passwordReset" in location.state &&
+    (location.state as { passwordReset?: boolean }).passwordReset === true;
 
   const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
@@ -92,6 +98,12 @@ export function LoginPage() {
           <h1 className="text-2xl font-bold">Welcome Back</h1>
           <p className="text-zinc-500 text-sm mt-2">Enter your credentials to access your account</p>
         </div>
+
+        {passwordJustReset && (
+          <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm text-center">
+            Password updated. Sign in with your new password.
+          </div>
+        )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-2">
