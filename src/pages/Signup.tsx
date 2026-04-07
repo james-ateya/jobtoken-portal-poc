@@ -74,6 +74,13 @@ export function SignupPage() {
         </div>
 
         <form onSubmit={handleSignup} className="space-y-4">
+          {role === "employer" ? (
+            <p className="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 mb-4 leading-relaxed">
+              Employer accounts are reviewed by an administrator. After approval, you will receive a welcome email with
+              a sign-in link and a temporary password. You cannot post jobs until then.
+            </p>
+          ) : null}
+
           <div className="flex p-1 bg-white/5 rounded-xl border border-white/10 mb-6">
             <button
               type="button"

@@ -22,8 +22,11 @@ import {
   Star,
   Banknote,
   UserCircle,
+  PenLine,
+  UserCheck,
 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { apiFetch } from "../lib/apiFetch";
 import { 
   LineChart, 
   Line, 
@@ -41,6 +44,7 @@ interface PlatformStats {
   total_revenue: number;
   active_seekers: number;
   registered_employers: number;
+  pending_employers: number;
   total_applications: number;
 }
 
@@ -155,6 +159,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
   const [grantingTokens, setGrantingTokens] = useState(false);
   const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingEarnings, setIsExportingEarnings] = useState(false);
   const [featureJobTokensAdmin, setFeatureJobTokensAdmin] = useState("2");
   const [savingFeatureTokens, setSavingFeatureTokens] = useState(false);
   const [financialOverview, setFinancialOverview] = useState<FinancialOverview | null>(null);
@@ -169,11 +174,11 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
     setLoading(true);
     try {
       const [statsRes, advStatsRes, analyticsRes, chartRes, finRes] = await Promise.all([
-        fetch("/api/admin/stats"),
-        fetch("/api/admin/advanced-stats"),
-        fetch("/api/admin/analytics-report"),
-        fetch("/api/admin/chart-data"),
-        fetch("/api/admin/financial-overview"),
+        apiFetch("/api/admin/stats"),
+        apiFetch("/api/admin/advanced-stats"),
+        apiFetch("/api/admin/analytics-report"),
+        apiFetch("/api/admin/chart-data"),
+        apiFetch("/api/admin/financial-overview"),
       ]);
 
       const statsParsed = await tryParseAdminApiJson<PlatformStats>(statsRes);
@@ -215,7 +220,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
         .limit(20);
       if (txData) setTransactions(txData as any);
 
-      const psRes = await fetch("/api/admin/platform-settings");
+      const psRes = await apiFetch("/api/admin/platform-settings");
       const psParsed = await tryParseAdminApiJson<{ feature_job_tokens: number }>(psRes);
       if (psParsed.htmlFallback && !htmlFallback) {
         showToast(
@@ -240,7 +245,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
       return;
     }
     try {
-      const res = await fetch(`/api/admin/global-search?query=${encodeURIComponent(val)}`);
+      const res = await apiFetch(`/api/admin/global-search?query=${encodeURIComponent(val)}`);
       const parsed = await tryParseAdminApiJson<{ transactions: any[]; profiles: any[] }>(res);
       if (parsed.data) setSearchResults(parsed.data);
     } catch (error) {
@@ -251,7 +256,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const res = await fetch("/api/admin/export-csv");
+      const res = await apiFetch("/api/admin/export-csv");
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
@@ -270,12 +275,38 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
     }
   };
 
+  const handleExportEarningsLedger = async () => {
+    if (!user?.id) return;
+    setIsExportingEarnings(true);
+    try {
+      const res = await apiFetch("/api/admin/export-earnings-ledger");
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `earnings_ledger_${new Date().toISOString().split("T")[0]}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        showToast("Earnings ledger export downloaded");
+      } else {
+        throw new Error(await readApiErrorMessage(res));
+      }
+    } catch (error: any) {
+      showToast(error.message || "Export failed", "error");
+    } finally {
+      setIsExportingEarnings(false);
+    }
+  };
+
   const handleDeleteJob = async (jobId: string) => {
     if (!confirm("Are you sure you want to delete this job post?")) return;
     
     setDeletingJobId(jobId);
     try {
-      const response = await fetch("/api/admin/jobs/delete", {
+      const response = await apiFetch("/api/admin/jobs/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobId }),
@@ -303,7 +334,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
     }
     setSavingFeatureTokens(true);
     try {
-      const res = await fetch("/api/admin/platform-settings", {
+      const res = await apiFetch("/api/admin/platform-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ feature_job_tokens: n }),
@@ -323,7 +354,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
     if (!searchEmail) return;
     setGrantingTokens(true);
     try {
-      const response = await fetch("/api/admin/tokens/grant", {
+      const response = await apiFetch("/api/admin/tokens/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: searchEmail, amount: 5 }),
@@ -371,6 +402,20 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
           >
             <UserCircle className="w-4 h-4 text-emerald-400" />
             Manage users
+          </Link>
+          <Link
+            to="/admin/prompt-grading"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold text-white hover:bg-white/10 transition-all"
+          >
+            <PenLine className="w-4 h-4 text-emerald-400" />
+            Grade prompts
+          </Link>
+          <Link
+            to="/admin/withdrawals"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold text-white hover:bg-white/10 transition-all"
+          >
+            <Banknote className="w-4 h-4 text-amber-400" />
+            Withdrawals
           </Link>
           <div className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
@@ -428,6 +473,19 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
           >
             {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             Export Financial Log (CSV)
+          </button>
+          <button
+            type="button"
+            onClick={handleExportEarningsLedger}
+            disabled={isExportingEarnings}
+            className="flex items-center gap-2 px-4 py-2.5 bg-amber-500/10 border border-amber-500/25 rounded-xl text-sm font-bold text-amber-400 hover:bg-amber-500 hover:text-black transition-all"
+          >
+            {isExportingEarnings ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            Earnings ledger (CSV)
           </button>
         </div>
       </div>
@@ -529,7 +587,21 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
       )}
 
       {/* Stats Grid - Vital Signs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <StatCard 
+          title="Employers awaiting approval" 
+          value={stats?.pending_employers ?? 0} 
+          icon={<UserCheck className="w-5 h-5" />} 
+          color="text-amber-400"
+          subtitle={
+            <Link
+              to="/admin/users?tab=employer"
+              className="text-amber-400/90 hover:text-amber-300 hover:underline"
+            >
+              Review on Manage users → Employers
+            </Link>
+          }
+        />
         <StatCard 
           title="Active Token Liability" 
           value={advancedStats?.token_liability || 0} 
@@ -777,7 +849,7 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
   );
 }
 
-function StatCard({ title, value, icon, color, subtitle }: { title: string, value: string | number, icon: React.ReactNode, color: string, subtitle?: string }) {
+function StatCard({ title, value, icon, color, subtitle }: { title: string, value: string | number, icon: React.ReactNode, color: string, subtitle?: React.ReactNode }) {
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}

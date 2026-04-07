@@ -7,6 +7,7 @@ import { JobCard } from "../components/JobCard";
 import { JobDetailModal } from "../components/JobDetailModal";
 import { CompanyProfileSeekerModal } from "../components/CompanyProfileSeekerModal";
 import { WalletDashboard } from "../components/WalletDashboard";
+import { HomePromptTeasers } from "../components/HomePromptTeasers";
 import { RefreshCw, LayoutDashboard, Briefcase } from "lucide-react";
 
 export function HomePage({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
@@ -167,6 +168,8 @@ export function HomePage({ user, showToast }: { user: any, showToast: (m: string
     <main className="max-w-7xl mx-auto px-6 py-12">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
         <div className="lg:col-span-8 space-y-8">
+          <HomePromptTeasers user={user} />
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h2 className="text-3xl font-bold tracking-tight">Available Jobs</h2>

@@ -25,7 +25,9 @@ import {
   Sparkles,
   Search,
   Briefcase,
+  PenLine,
 } from "lucide-react";
+import { PromptSeriesCards } from "../components/PromptSeriesCards";
 import { cn } from "../lib/utils";
 import { applicationStatusLabel, applicationStatusTone } from "../lib/applicationStatus";
 
@@ -424,6 +426,30 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
               Edit
             </span>
           </Link>
+
+          <div className="p-8 rounded-3xl border border-emerald-500/20 bg-emerald-500/[0.04] space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center text-emerald-400">
+                  <PenLine className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white">Earn KES — prompt tasks</h3>
+                  <p className="text-sm text-zinc-500 mt-0.5">
+                    Short writing tasks: pay tokens to submit, earn KES when approved. Opens in a new
+                    section of your dashboard.
+                  </p>
+                </div>
+              </div>
+              <Link
+                to="/dashboard/prompts"
+                className="text-xs font-bold text-emerald-400 hover:text-emerald-300 uppercase tracking-wider shrink-0"
+              >
+                Full list
+              </Link>
+            </div>
+            <PromptSeriesCards compact />
+          </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <motion.div 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
 import { supabase } from "./lib/supabase";
 import { HomePage } from "./pages/Home";
 import { LoginPage } from "./pages/Login";
@@ -9,15 +9,22 @@ import { SignupPage } from "./pages/Signup";
 import { DashboardPage } from "./pages/Dashboard";
 import { EmployerDashboard } from "./pages/EmployerDashboard";
 import { EmployerApplicationsPage } from "./pages/EmployerApplications";
+import { EmployerPromptSeriesListPage } from "./pages/EmployerPromptSeriesListPage";
+import { EmployerPromptSeriesEditorPage } from "./pages/EmployerPromptSeriesEditorPage";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
+import { AdminPromptGradingPage } from "./pages/AdminPromptGradingPage";
+import { AdminWithdrawalsPage } from "./pages/AdminWithdrawalsPage";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
 import { EmployerProfilePage } from "./pages/EmployerProfile";
 import { SeekerApplicationsPage } from "./pages/SeekerApplications";
+import { SeekerEarningsPage } from "./pages/SeekerEarningsPage";
+import { PromptSeriesBrowsePage } from "./pages/PromptSeriesBrowsePage";
+import { PromptSeriesDetailPage } from "./pages/PromptSeriesDetailPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { ThemeMenu } from "./components/ThemeMenu";
 import { motion, AnimatePresence } from "motion/react";
-import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2 } from "lucide-react";
+import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine } from "lucide-react";
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -150,6 +157,20 @@ export default function App() {
                         My applications
                       </Link>
                       <Link
+                        to="/dashboard/prompts"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <PenLine className="w-4 h-4" />
+                        Prompt tasks
+                      </Link>
+                      <Link
+                        to="/dashboard/earnings"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <Banknote className="w-4 h-4" />
+                        Earnings
+                      </Link>
+                      <Link
                         to="/dashboard/profile"
                         className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
                       >
@@ -173,6 +194,13 @@ export default function App() {
                       >
                         <Users className="w-4 h-4" />
                         Applications
+                      </Link>
+                      <Link
+                        to="/dashboard/employer/prompts"
+                        className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                      >
+                        <PenLine className="w-4 h-4" />
+                        Prompt series
                       </Link>
                     </>
                   )}
@@ -248,6 +276,78 @@ export default function App() {
             }
           />
           <Route
+            path="/dashboard/earnings"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "seeker" ? (
+                  <SeekerEarningsPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <Banknote className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Seekers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Earnings and withdrawals are for job seeker accounts.
+                    </p>
+                    <Link
+                      to={userRole === "employer" ? "/dashboard/employer" : "/admin"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to portal
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/prompts"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "seeker" ? (
+                  <PromptSeriesBrowsePage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <PenLine className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Seekers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Prompt tasks are for job seeker accounts.
+                    </p>
+                    <Link
+                      to={userRole === "employer" ? "/dashboard/employer" : "/admin"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to portal
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/prompts/:seriesId"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "seeker" ? (
+                  <PromptSeriesDetailPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <PenLine className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Seekers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Prompt tasks are for job seeker accounts.
+                    </p>
+                    <Link
+                      to={userRole === "employer" ? "/dashboard/employer" : "/admin"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to portal
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/dashboard/applications"
             element={
               <ProtectedRoute user={user} loading={loading}>
@@ -308,6 +408,54 @@ export default function App() {
             }
           />
           <Route
+            path="/dashboard/employer/prompts"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "employer" ? (
+                  <EmployerPromptSeriesListPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <PenLine className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Employers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Managing prompt series is limited to employer accounts.
+                    </p>
+                    <Link
+                      to={userRole === "seeker" ? "/dashboard" : "/admin"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to portal
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/employer/prompts/:seriesId"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "employer" ? (
+                  <EmployerPromptSeriesEditorPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-6">
+                    <PenLine className="w-14 h-14 text-zinc-600 mb-4" />
+                    <h1 className="text-xl font-bold">Employers only</h1>
+                    <p className="text-zinc-500 mt-2 max-w-md">
+                      Managing prompt series is limited to employer accounts.
+                    </p>
+                    <Link
+                      to={userRole === "seeker" ? "/dashboard" : "/admin"}
+                      className="mt-6 px-6 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400"
+                    >
+                      Go to portal
+                    </Link>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/dashboard/employer/profile"
             element={
               <ProtectedRoute user={user} loading={loading}>
@@ -354,6 +502,38 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminUsersPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/prompt-grading"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminPromptGradingPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/withdrawals"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminWithdrawalsPage user={user} showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />

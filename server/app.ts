@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
@@ -14,6 +15,14 @@ import {
   type StkCallbackParsed,
 } from "./mpesa.js";
 import { processStkCallback } from "./process-stk-callback.js";
+import {
+  requireAdmin,
+  requireApprovedEmployer,
+  requireAuth,
+  requireEmployer,
+  requireSeeker,
+  type AuthedRequest,
+} from "./auth.js";
 
 const { loadedFiles } = loadProjectEnv();
 if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
@@ -34,7 +43,9 @@ if (process.env.VERCEL) {
       pathOnly !== "/" &&
       !pathOnly.startsWith("/api/") &&
       pathOnly !== "/api" &&
-      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin)\b/.test(pathOnly);
+      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin|prompts|earnings|health|monitoring)\b/.test(
+        pathOnly
+      );
     if (needsApi) {
       req.url = "/api" + pathOnly + query;
     }
@@ -45,10 +56,37 @@ if (process.env.VERCEL) {
 app.use(express.json());
 app.use(cors());
 
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    uptime_s: Math.floor((Date.now() - serverStartedAt) / 1000),
+  });
+});
+
+app.get("/api/monitoring", (_req, res) => {
+  const m = process.memoryUsage();
+  res.json({
+    ok: true,
+    uptime_s: Math.floor((Date.now() - serverStartedAt) / 1000),
+    memory_mb: Math.round((m.heapUsed / 1024 / 1024) * 100) / 100,
+    rss_mb: Math.round((m.rss / 1024 / 1024) * 100) / 100,
+    node: process.version,
+    env: process.env.NODE_ENV || "development",
+  });
+});
+
 const supabaseAdmin = createClient(
   process.env.VITE_SUPABASE_URL || "",
   process.env.SUPABASE_SERVICE_ROLE_KEY || ""
 );
+
+const requireAuthMw = requireAuth(supabaseAdmin);
+const requireAdminMw = requireAdmin(supabaseAdmin);
+const requireSeekerMw = requireSeeker(supabaseAdmin);
+const requireEmployerMw = requireEmployer(supabaseAdmin);
+const requireApprovedEmployerMw = requireApprovedEmployer(supabaseAdmin);
+
+const serverStartedAt = Date.now();
 
 /** Job listing profession (DB column jobs.area_of_business). Accept either key from the client. */
 function readJobProfessionField(body: Record<string, unknown>): string | null {
@@ -126,6 +164,28 @@ async function ensureWallet(userId: string) {
   }
   if (!wallet) throw new Error("Wallet could not be initialized");
   return wallet;
+}
+
+function countWordsAnswer(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
+}
+
+async function getEarningsBalanceKes(userId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("earnings_ledger")
+    .select("amount_kes")
+    .eq("user_id", userId);
+  if (error) throw error;
+  return (data ?? []).reduce((acc, row) => acc + Number(row.amount_kes || 0), 0);
+}
+
+/** Withdrawal requests allowed from this calendar day of month onward (default 25). */
+function isWithdrawalWindowNow(): boolean {
+  const minDay = Math.max(
+    1,
+    Math.min(28, parseInt(process.env.EARNINGS_WITHDRAWAL_DAY_MIN || "25", 10) || 25)
+  );
+  return new Date().getDate() >= minDay;
 }
 
 // --- Auth / email ---
@@ -219,8 +279,8 @@ app.get("/api/employer/pricing", async (_req, res) => {
 });
 
 // --- Simulated top-up (dev / fallback) ---
-app.post("/api/topup", async (req, res) => {
-  const { userId } = req.body;
+app.post("/api/topup", requireAuthMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
 
   if (process.env.MPESA_SIMULATE !== "true") {
     return res.status(400).json({
@@ -268,8 +328,9 @@ app.post("/api/topup", async (req, res) => {
 });
 
 // --- M-Pesa STK ---
-app.post("/api/mpesa/stk-push", async (req, res) => {
-  const { userId, phoneNumber, packKes, amountKes } = req.body;
+app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
+  const { phoneNumber, packKes, amountKes } = req.body;
   const { min, max, kesPerToken } = getTopupKesBounds();
 
   const raw =
@@ -279,9 +340,9 @@ app.post("/api/mpesa/stk-push", async (req, res) => {
         ? Number(packKes)
         : NaN;
 
-  if (!userId || !phoneNumber || !Number.isFinite(raw)) {
+  if (!phoneNumber || !Number.isFinite(raw)) {
     return res.status(400).json({
-      error: "userId, phoneNumber, and amount (amountKes or packKes) are required",
+      error: "phoneNumber and amount (amountKes or packKes) are required",
     });
   }
 
@@ -741,9 +802,9 @@ async function notifySeekersJobProfessionMatch(opts: {
 }
 
 // --- Employer job posting (fees + featured) ---
-app.post("/api/employer/post-job", async (req, res) => {
+app.post("/api/employer/post-job", requireApprovedEmployerMw, async (req, res) => {
   const body = parseJsonBody(req);
-  const userId = asNonEmptyString(body.userId);
+  const userId = (req as AuthedRequest).authUserId;
   const title = asNonEmptyString(body.title);
   const description = asNonEmptyString(body.description);
   const job_type = asNonEmptyString(body.job_type);
@@ -751,7 +812,7 @@ app.post("/api/employer/post-job", async (req, res) => {
   const is_featured = body.is_featured;
   const closes_at = body.closes_at;
 
-  if (!userId || !title || !description || !job_type) {
+  if (!title || !description || !job_type) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
@@ -765,16 +826,6 @@ app.post("/api/employer/post-job", async (req, res) => {
     const featureFee = await getFeatureJobTokens();
     let totalFee = postingFee;
     if (featured) totalFee += featureFee;
-
-    const { data: profile, error: pErr } = await supabaseAdmin
-      .from("profiles")
-      .select("role")
-      .eq("id", userId)
-      .single();
-
-    if (pErr || profile?.role !== "employer") {
-      return res.status(403).json({ error: "Only employers can post jobs" });
-    }
 
     const closesAt =
       closes_at && String(closes_at).trim()
@@ -874,9 +925,9 @@ app.post("/api/employer/post-job", async (req, res) => {
   }
 });
 
-app.post("/api/employer/update-job", async (req, res) => {
+app.post("/api/employer/update-job", requireApprovedEmployerMw, async (req, res) => {
   const body = parseJsonBody(req);
-  const userId = asNonEmptyString(body.userId);
+  const userId = (req as AuthedRequest).authUserId;
   const jobId = asNonEmptyString(body.jobId);
   const title = asNonEmptyString(body.title);
   const description = asNonEmptyString(body.description);
@@ -1002,8 +1053,8 @@ app.post("/api/employer/update-job", async (req, res) => {
   }
 });
 
-// --- Admin ---
-app.post("/api/admin/jobs/delete", async (req, res) => {
+// --- Admin (JWT + admin role; see server/auth.ts) ---
+app.post("/api/admin/jobs/delete", requireAdminMw, async (req, res) => {
   const { jobId } = req.body;
   try {
     const { error } = await supabaseAdmin.from("jobs").delete().eq("id", jobId);
@@ -1014,7 +1065,7 @@ app.post("/api/admin/jobs/delete", async (req, res) => {
   }
 });
 
-app.post("/api/admin/tokens/grant", async (req, res) => {
+app.post("/api/admin/tokens/grant", requireAdminMw, async (req, res) => {
   const { email, amount } = req.body;
   try {
     const { data: profile, error: profileError } = await supabaseAdmin
@@ -1056,7 +1107,7 @@ app.post("/api/admin/tokens/grant", async (req, res) => {
   }
 });
 
-app.get("/api/admin/platform-settings", async (_req, res) => {
+app.get("/api/admin/platform-settings", requireAdminMw, async (_req, res) => {
   try {
     const feature_job_tokens = await getFeatureJobTokens();
     res.json({ feature_job_tokens });
@@ -1101,11 +1152,11 @@ async function handleAdminPlatformSettingsWrite(req: express.Request, res: expre
   }
 }
 
-app.put("/api/admin/platform-settings", handleAdminPlatformSettingsWrite);
-app.post("/api/admin/platform-settings", handleAdminPlatformSettingsWrite);
+app.put("/api/admin/platform-settings", requireAdminMw, handleAdminPlatformSettingsWrite);
+app.post("/api/admin/platform-settings", requireAdminMw, handleAdminPlatformSettingsWrite);
 
 /** Top-ups received, token float, application token “income” (KES estimates use MPESA_KES_PER_TOKEN). */
-app.get("/api/admin/financial-overview", async (_req, res) => {
+app.get("/api/admin/financial-overview", requireAdminMw, async (_req, res) => {
   try {
     const kesPerToken = getKesPerToken();
 
@@ -1148,12 +1199,14 @@ app.get("/api/admin/financial-overview", async (_req, res) => {
   }
 });
 
-app.get("/api/admin/users", async (req, res) => {
+app.get("/api/admin/users", requireAdminMw, async (req, res) => {
   const role = String(req.query.role || "").toLowerCase();
   try {
     let q = supabaseAdmin
       .from("profiles")
-      .select("id, email, full_name, role, is_active, created_at")
+      .select(
+        "id, email, full_name, role, is_active, created_at, employer_approval_status, employer_approved_at"
+      )
       .in("role", ["seeker", "employer"])
       .order("email", { ascending: true });
 
@@ -1169,7 +1222,116 @@ app.get("/api/admin/users", async (req, res) => {
   }
 });
 
-app.get("/api/admin/user/:userId", async (req, res) => {
+app.post("/api/admin/employers/:userId/approve", requireAdminMw, async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const { data: profile, error: pe } = await supabaseAdmin
+      .from("profiles")
+      .select("id, role, email, full_name, employer_approval_status")
+      .eq("id", userId)
+      .single();
+
+    if (pe || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role !== "employer") {
+      return res.status(400).json({ error: "Not an employer account" });
+    }
+    if (profile.employer_approval_status === "approved") {
+      return res.status(400).json({ error: "Employer is already approved" });
+    }
+
+    const raw = randomBytes(12).toString("base64url").replace(/[^a-zA-Z0-9]/g, "");
+    const tempPassword = `${(raw.slice(0, 10) || "JobToken01")}aA1`;
+
+    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+      password: tempPassword,
+    });
+    if (authErr) throw authErr;
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabaseAdmin
+      .from("profiles")
+      .update({
+        employer_approval_status: "approved",
+        employer_approved_at: now,
+        is_active: true,
+      })
+      .eq("id", userId);
+    if (upErr) throw upErr;
+
+    const emailTo = (profile as { email?: string | null }).email;
+    if (!emailTo) {
+      return res.status(400).json({ error: "Profile has no email" });
+    }
+
+    const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+    const loginUrl = `${appUrl}/login`;
+    const name = escapeHtml((profile as { full_name?: string | null }).full_name || "there");
+
+    await sendMail({
+      to: emailTo,
+      subject: "Your JobToken employer account is approved",
+      html: `
+        <div style="font-family: system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
+          <h1 style="font-size: 20px; color: #059669;">You're approved</h1>
+          <p>Hi ${name},</p>
+          <p>Your employer account has been approved. You can sign in and post jobs on JobToken.</p>
+          <p style="margin: 16px 0;"><strong>Sign-in link:</strong><br/>
+            <a href="${escapeHtml(loginUrl)}" style="color: #059669;">${escapeHtml(loginUrl)}</a>
+          </p>
+          <p><strong>Username (email):</strong> ${escapeHtml(emailTo)}</p>
+          <p><strong>Temporary password:</strong> <code style="background:#f4f4f5;padding:4px 8px;border-radius:6px;">${escapeHtml(tempPassword)}</code></p>
+          <p style="font-size: 13px; color: #71717a;">Change this password after signing in when your account settings allow it.</p>
+          <hr style="border: none; border-top: 1px solid #e4e4e7; margin: 24px 0;" />
+          <p style="font-size: 12px; color: #a1a1aa;">JobToken employer onboarding</p>
+        </div>
+      `,
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/employers/:userId/reject", requireAdminMw, async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const { data: profile, error: pe } = await supabaseAdmin
+      .from("profiles")
+      .select("id, role, employer_approval_status")
+      .eq("id", userId)
+      .single();
+
+    if (pe || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role !== "employer") {
+      return res.status(400).json({ error: "Not an employer account" });
+    }
+    if (profile.employer_approval_status === "approved") {
+      return res.status(400).json({
+        error: "Employer is already approved; use deactivate if you need to block access.",
+      });
+    }
+
+    const { error: upErr } = await supabaseAdmin
+      .from("profiles")
+      .update({
+        employer_approval_status: "rejected",
+        is_active: false,
+      })
+      .eq("id", userId);
+    if (upErr) throw upErr;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
   const { userId } = req.params;
   if (!userId) return res.status(400).json({ error: "userId required" });
 
@@ -1271,7 +1433,7 @@ app.get("/api/admin/user/:userId", async (req, res) => {
   }
 });
 
-app.post("/api/admin/users/set-active", async (req, res) => {
+app.post("/api/admin/users/set-active", requireAdminMw, async (req, res) => {
   const body = parseJsonBody(req);
   const userId = asNonEmptyString(body.userId);
   const isActive = body.isActive === true || body.isActive === false ? body.isActive : null;
@@ -1306,7 +1468,7 @@ app.post("/api/admin/users/set-active", async (req, res) => {
   }
 });
 
-app.post("/api/admin/users/delete", async (req, res) => {
+app.post("/api/admin/users/delete", requireAdminMw, async (req, res) => {
   const body = parseJsonBody(req);
   const userId = asNonEmptyString(body.userId);
 
@@ -1337,7 +1499,7 @@ app.post("/api/admin/users/delete", async (req, res) => {
   }
 });
 
-app.get("/api/admin/stats", async (req, res) => {
+app.get("/api/admin/stats", requireAdminMw, async (req, res) => {
   try {
     const { data: topups } = await supabaseAdmin
       .from("transactions")
@@ -1361,6 +1523,12 @@ app.get("/api/admin/stats", async (req, res) => {
       .select("*", { count: "exact", head: true })
       .eq("role", "employer");
 
+    const { count: pendingEmployers } = await supabaseAdmin
+      .from("profiles")
+      .select("*", { count: "exact", head: true })
+      .eq("role", "employer")
+      .eq("employer_approval_status", "pending");
+
     const { count: totalApplications } = await supabaseAdmin
       .from("applications")
       .select("*", { count: "exact", head: true });
@@ -1369,6 +1537,7 @@ app.get("/api/admin/stats", async (req, res) => {
       total_revenue: totalRevenue,
       active_seekers: activeSeekers || 0,
       registered_employers: registeredEmployers || 0,
+      pending_employers: pendingEmployers || 0,
       total_applications: totalApplications || 0,
     });
   } catch (error: any) {
@@ -1376,7 +1545,7 @@ app.get("/api/admin/stats", async (req, res) => {
   }
 });
 
-app.get("/api/admin/advanced-stats", async (req, res) => {
+app.get("/api/admin/advanced-stats", requireAdminMw, async (req, res) => {
   try {
     const { data: wallets } = await supabaseAdmin.from("wallets").select("token_balance");
     const totalLiability = wallets?.reduce((acc, w) => acc + w.token_balance, 0) || 0;
@@ -1415,7 +1584,7 @@ app.get("/api/admin/advanced-stats", async (req, res) => {
   }
 });
 
-app.get("/api/admin/analytics-report", async (req, res) => {
+app.get("/api/admin/analytics-report", requireAdminMw, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin.from("admin_analytics_report").select("*");
 
@@ -1449,7 +1618,7 @@ app.get("/api/admin/analytics-report", async (req, res) => {
   }
 });
 
-app.get("/api/admin/chart-data", async (req, res) => {
+app.get("/api/admin/chart-data", requireAdminMw, async (req, res) => {
   try {
     const last7Days = new Date();
     last7Days.setDate(last7Days.getDate() - 7);
@@ -1493,7 +1662,7 @@ app.get("/api/admin/chart-data", async (req, res) => {
   }
 });
 
-app.get("/api/admin/export-csv", async (req, res) => {
+app.get("/api/admin/export-csv", requireAdminMw, async (req, res) => {
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -1539,7 +1708,7 @@ app.get("/api/admin/export-csv", async (req, res) => {
   }
 });
 
-app.get("/api/admin/global-search", async (req, res) => {
+app.get("/api/admin/global-search", requireAdminMw, async (req, res) => {
   const { query } = req.query;
   if (!query) return res.json({ results: [] });
 
@@ -1568,6 +1737,724 @@ app.get("/api/admin/global-search", async (req, res) => {
       transactions: txResults || [],
       profiles: profileResults || [],
     });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Prompt series & earnings ledger (see EARNINGS_PLAN.md) ---
+
+app.get("/api/prompts/series", async (_req, res) => {
+  try {
+    const { data: series, error } = await supabaseAdmin
+      .from("prompt_series")
+      .select("id, title, description, status, created_at, created_by")
+      .eq("status", "published")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const list = series ?? [];
+    const ids = list.map((s) => s.id);
+    const counts: Record<string, number> = {};
+    if (ids.length) {
+      const { data: prompts } = await supabaseAdmin
+        .from("prompts")
+        .select("series_id")
+        .in("series_id", ids)
+        .eq("is_published", true);
+      for (const p of prompts ?? []) {
+        const sid = (p as { series_id: string }).series_id;
+        counts[sid] = (counts[sid] || 0) + 1;
+      }
+    }
+
+    res.json({
+      series: list.map((s) => ({
+        ...s,
+        prompt_count: counts[s.id] ?? 0,
+      })),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Public teaser list for the landing page: prompts under published series (headline, instructions, economics). */
+app.get("/api/prompts/home-preview", async (_req, res) => {
+  const limit = 10;
+  try {
+    const { data: publishedSeries, error: se } = await supabaseAdmin
+      .from("prompt_series")
+      .select("id, title")
+      .eq("status", "published");
+
+    if (se) throw se;
+    const seriesRows = publishedSeries ?? [];
+    if (seriesRows.length === 0) {
+      return res.json({ prompts: [] });
+    }
+
+    const titleBySeriesId: Record<string, string> = {};
+    for (const row of seriesRows) {
+      titleBySeriesId[(row as { id: string }).id] = (row as { title: string }).title;
+    }
+    const seriesIds = seriesRows.map((r) => (r as { id: string }).id);
+
+    const { data: prompts, error: pe } = await supabaseAdmin
+      .from("prompts")
+      .select("id, headline, instructions, reward_kes, submit_cost_tokens, series_id, sort_order")
+      .in("series_id", seriesIds)
+      .eq("is_published", true)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (pe) throw pe;
+
+    const list = (prompts ?? []).map((p: any) => ({
+      id: p.id,
+      headline: p.headline,
+      instructions: p.instructions,
+      reward_kes: p.reward_kes,
+      submit_cost_tokens: p.submit_cost_tokens,
+      series_id: p.series_id,
+      series_title: titleBySeriesId[p.series_id] ?? null,
+    }));
+
+    res.json({ prompts: list });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/prompts/series/:seriesId", async (req, res) => {
+  const { seriesId } = req.params;
+  try {
+    const { data: s, error } = await supabaseAdmin
+      .from("prompt_series")
+      .select("*")
+      .eq("id", seriesId)
+      .single();
+
+    if (error || !s) {
+      return res.status(404).json({ error: "Series not found" });
+    }
+    if (s.status !== "published") {
+      return res.status(404).json({ error: "Series not found" });
+    }
+
+    const { data: prompts, error: qErr } = await supabaseAdmin
+      .from("prompts")
+      .select(
+        "id, sort_order, headline, instructions, word_limit, reward_kes, submit_cost_tokens, is_published, created_at"
+      )
+      .eq("series_id", seriesId)
+      .eq("is_published", true)
+      .order("sort_order", { ascending: true });
+
+    if (qErr) throw qErr;
+
+    res.json({ series: s, prompts: prompts ?? [] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = (req as AuthedRequest).authUserId;
+  const promptId = asNonEmptyString(body.promptId);
+  const answerRaw = body.answerText;
+  const answerText = typeof answerRaw === "string" ? answerRaw.trim() : "";
+
+  if (!promptId || !answerText) {
+    return res.status(400).json({ error: "promptId and answerText are required" });
+  }
+
+  try {
+    const { data: prompt, error: pErr } = await supabaseAdmin
+      .from("prompts")
+      .select("id, submit_cost_tokens, word_limit, series_id, is_published")
+      .eq("id", promptId)
+      .single();
+
+    if (pErr || !prompt) {
+      return res.status(404).json({ error: "Prompt not found" });
+    }
+    if (!prompt.is_published) {
+      return res.status(400).json({ error: "Prompt is not available" });
+    }
+
+    const { data: ser } = await supabaseAdmin
+      .from("prompt_series")
+      .select("status")
+      .eq("id", prompt.series_id)
+      .single();
+
+    if (!ser || ser.status !== "published") {
+      return res.status(400).json({ error: "Series is not published" });
+    }
+
+    const wc = countWordsAnswer(answerText);
+    if (prompt.word_limit != null && wc > Number(prompt.word_limit)) {
+      return res.status(400).json({
+        error: `Answer must be at most ${prompt.word_limit} words (currently ${wc})`,
+      });
+    }
+
+    const cost = Number(prompt.submit_cost_tokens) || 0;
+    if (cost < 1) {
+      return res.status(500).json({ error: "Invalid prompt token cost" });
+    }
+
+    const wallet = await ensureWallet(userId);
+    if (!walletTokensNotExpired(wallet.expires_at)) {
+      return res.status(400).json({ error: "Your tokens have expired. Top up to continue." });
+    }
+    if (wallet.token_balance < cost) {
+      return res.status(400).json({
+        error: `Insufficient tokens. Need ${cost} to submit this answer.`,
+      });
+    }
+
+    const { error: wu } = await supabaseAdmin
+      .from("wallets")
+      .update({ token_balance: wallet.token_balance - cost })
+      .eq("id", wallet.id);
+
+    if (wu) throw wu;
+
+    const refBase = `PROMPT-${Math.random().toString(36).slice(2, 10)}`;
+
+    const { data: submission, error: insErr } = await supabaseAdmin
+      .from("prompt_submissions")
+      .insert({
+        prompt_id: promptId,
+        user_id: userId,
+        answer_text: answerText,
+        word_count: wc,
+        tokens_charged: cost,
+        grade_status: "pending",
+      })
+      .select("id")
+      .single();
+
+    if (insErr) {
+      await supabaseAdmin
+        .from("wallets")
+        .update({ token_balance: wallet.token_balance })
+        .eq("id", wallet.id);
+      if (insErr.code === "23505") {
+        return res.status(409).json({ error: "You have already submitted an answer for this prompt" });
+      }
+      throw insErr;
+    }
+
+    const { error: txErr } = await supabaseAdmin.from("transactions").insert({
+      wallet_id: wallet.id,
+      tokens_added: -cost,
+      type: "prompt_submission",
+      reference_id: `${refBase}-${submission?.id?.slice(0, 8) ?? "sub"}`,
+      status: "completed",
+    });
+
+    if (txErr) {
+      await supabaseAdmin.from("prompt_submissions").delete().eq("id", submission!.id);
+      await supabaseAdmin
+        .from("wallets")
+        .update({ token_balance: wallet.token_balance })
+        .eq("id", wallet.id);
+      throw txErr;
+    }
+
+    res.json({ success: true, submissionId: submission?.id });
+  } catch (error: any) {
+    console.error("prompt submit:", error);
+    res.status(500).json({ error: error.message || "Submit failed" });
+  }
+});
+
+app.get("/api/earnings/summary", requireSeekerMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
+
+  try {
+    const balance = await getEarningsBalanceKes(userId);
+    res.json({ balance_kes: balance });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/earnings/ledger", requireSeekerMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+  const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) throw error;
+    res.json({ entries: data ?? [] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = (req as AuthedRequest).authUserId;
+  const amountRaw = body.amountKesRequested ?? body.amount_kes_requested;
+  const amount = typeof amountRaw === "number" ? amountRaw : parseFloat(String(amountRaw ?? ""));
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Positive amountKesRequested required" });
+  }
+
+  if (!isWithdrawalWindowNow()) {
+    return res.status(400).json({
+      error:
+        "Withdrawal requests are only open from the configured day of the month until month end (see EARNINGS_WITHDRAWAL_DAY_MIN).",
+    });
+  }
+
+  try {
+    const balance = await getEarningsBalanceKes(userId);
+    if (amount > balance) {
+      return res.status(400).json({
+        error: `Requested amount exceeds available balance (${balance.toFixed(2)} KES)`,
+      });
+    }
+
+    const now = new Date();
+    const periodMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString()
+      .slice(0, 10);
+
+    const { data: row, error } = await supabaseAdmin
+      .from("withdrawal_requests")
+      .insert({
+        user_id: userId,
+        amount_kes_requested: Math.round(amount * 100) / 100,
+        period_month: periodMonth,
+        status: "pending",
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      if (error.code === "23505") {
+        return res.status(409).json({
+          error: "You already have a pending withdrawal request for this month",
+        });
+      }
+      throw error;
+    }
+
+    res.json({ success: true, requestId: row?.id });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/prompt-submissions/:submissionId/grade", requireAdminMw, async (req, res) => {
+  const { submissionId } = req.params;
+  const body = parseJsonBody(req);
+  const adminUserId = (req as AuthedRequest).authUserId;
+  const grade = asNonEmptyString(body.grade);
+
+  if (grade !== "pass" && grade !== "fail") {
+    return res.status(400).json({ error: "grade (pass|fail) required" });
+  }
+
+  try {
+    const { data: raw, error: rpcErr } = await supabaseAdmin.rpc("grade_prompt_submission", {
+      p_submission_id: submissionId,
+      p_grade: grade,
+      p_graded_by: adminUserId,
+    });
+
+    if (rpcErr) throw rpcErr;
+
+    const row = raw as {
+      ok?: boolean;
+      error?: string;
+      duplicate_reward?: boolean;
+    };
+
+    if (!row?.ok) {
+      if (row?.error === "not_found") {
+        return res.status(404).json({ error: "Submission not found" });
+      }
+      if (row?.error === "already_graded") {
+        return res.status(400).json({ error: "Submission already graded" });
+      }
+      return res.status(400).json({ error: row?.error || "Cannot grade submission" });
+    }
+
+    if (row.duplicate_reward) {
+      return res.json({ success: true, duplicateReward: true });
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+function csvEscapeCell(value: string): string {
+  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+app.get("/api/admin/prompt-submissions", requireAdminMw, async (req, res) => {
+  const statusFilter = ((req.query.status as string) || "pending").toLowerCase();
+  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? "20"), 10) || 20));
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  try {
+    const effectiveStatus =
+      statusFilter === "all"
+        ? null
+        : statusFilter === "pending" || statusFilter === "pass" || statusFilter === "fail"
+          ? statusFilter
+          : "pending";
+
+    let countQ = supabaseAdmin
+      .from("prompt_submissions")
+      .select("*", { count: "exact", head: true });
+    if (effectiveStatus) countQ = countQ.eq("grade_status", effectiveStatus);
+    const { count: total, error: cErr } = await countQ;
+    if (cErr) throw cErr;
+
+    let subq = supabaseAdmin
+      .from("prompt_submissions")
+      .select(
+        "id, user_id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at"
+      );
+    if (effectiveStatus) subq = subq.eq("grade_status", effectiveStatus);
+
+    const { data: subs, error: sErr } = await subq
+      .order("submitted_at", { ascending: true })
+      .range(from, to);
+    if (sErr) throw sErr;
+    const list = subs ?? [];
+    if (list.length === 0) {
+      return res.json({
+        submissions: [],
+        total: total ?? 0,
+        page,
+        pageSize,
+        totalPages: Math.ceil((total ?? 0) / pageSize) || 0,
+      });
+    }
+
+    const promptIds = [...new Set(list.map((s: { prompt_id: string }) => s.prompt_id))];
+    const userIds = [...new Set(list.map((s: { user_id: string }) => s.user_id))];
+
+    const { data: prompts, error: pErr } = await supabaseAdmin
+      .from("prompts")
+      .select("id, headline, reward_kes, series_id")
+      .in("id", promptIds);
+    if (pErr) throw pErr;
+
+    const seriesIds = [...new Set((prompts ?? []).map((p: { series_id: string }) => p.series_id))];
+    const { data: seriesRows, error: seErr } = await supabaseAdmin
+      .from("prompt_series")
+      .select("id, title")
+      .in("id", seriesIds);
+    if (seErr) throw seErr;
+
+    const { data: profs, error: prErr } = await supabaseAdmin
+      .from("profiles")
+      .select("id, email, full_name")
+      .in("id", userIds);
+    if (prErr) throw prErr;
+
+    const promptMap = Object.fromEntries((prompts ?? []).map((p: any) => [p.id, p]));
+    const seriesMap = Object.fromEntries((seriesRows ?? []).map((s: any) => [s.id, s]));
+    const profileMap = Object.fromEntries((profs ?? []).map((p: any) => [p.id, p]));
+
+    const submissions = list.map((sub: any) => {
+      const pr = promptMap[sub.prompt_id];
+      const ser = pr ? seriesMap[pr.series_id] : null;
+      const prof = profileMap[sub.user_id];
+      return {
+        ...sub,
+        prompt_headline: pr?.headline ?? null,
+        reward_kes: pr?.reward_kes ?? null,
+        series_title: ser?.title ?? null,
+        seeker_email: prof?.email ?? null,
+        seeker_name: prof?.full_name ?? null,
+      };
+    });
+
+    const totalN = total ?? 0;
+    res.json({
+      submissions,
+      total: totalN,
+      page,
+      pageSize,
+      totalPages: Math.ceil(totalN / pageSize) || 0,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
+  const statusParam = (req.query.status as string | undefined)?.trim();
+  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? "25"), 10) || 25));
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  try {
+    let countQ = supabaseAdmin
+      .from("withdrawal_requests")
+      .select("*", { count: "exact", head: true });
+    let dataQ = supabaseAdmin.from("withdrawal_requests").select(
+      `
+        *,
+        profiles:user_id (email, full_name)
+      `
+    );
+
+    if (statusParam) {
+      const statuses = statusParam.split(",").map((s) => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        countQ = countQ.eq("status", statuses[0]);
+        dataQ = dataQ.eq("status", statuses[0]);
+      } else if (statuses.length > 1) {
+        countQ = countQ.in("status", statuses);
+        dataQ = dataQ.in("status", statuses);
+      }
+    }
+
+    const { count: total, error: cErr } = await countQ;
+    if (cErr) throw cErr;
+
+    const { data, error } = await dataQ
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (error) throw error;
+    const totalN = total ?? 0;
+    res.json({
+      requests: data ?? [],
+      total: totalN,
+      page,
+      pageSize,
+      totalPages: Math.ceil(totalN / pageSize) || 0,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/export-earnings-ledger", requireAdminMw, async (_req, res) => {
+  try {
+    const { data: rows, error } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select(
+        `
+        id,
+        user_id,
+        amount_kes,
+        entry_type,
+        reference_type,
+        reference_id,
+        created_at,
+        metadata,
+        profiles:user_id (email, full_name)
+      `
+      )
+      .order("created_at", { ascending: false })
+      .limit(10000);
+
+    if (error) throw error;
+
+    const header = [
+      "created_at",
+      "user_email",
+      "user_name",
+      "amount_kes",
+      "entry_type",
+      "reference_type",
+      "reference_id",
+      "metadata_json",
+      "ledger_id",
+    ];
+
+    const lines = [header.join(",")];
+    for (const row of rows ?? []) {
+      const prof = (row as any).profiles as { email?: string; full_name?: string } | null;
+      const meta =
+        row.metadata && typeof row.metadata === "object"
+          ? JSON.stringify(row.metadata)
+          : String(row.metadata ?? "");
+      lines.push(
+        [
+          csvEscapeCell(new Date((row as any).created_at).toISOString()),
+          csvEscapeCell(prof?.email ?? ""),
+          csvEscapeCell(prof?.full_name ?? ""),
+          csvEscapeCell(String((row as any).amount_kes)),
+          csvEscapeCell(String((row as any).entry_type)),
+          csvEscapeCell(String((row as any).reference_type ?? "")),
+          csvEscapeCell(String((row as any).reference_id ?? "")),
+          csvEscapeCell(meta),
+          csvEscapeCell(String((row as any).id)),
+        ].join(",")
+      );
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=earnings_ledger_${new Date().toISOString().slice(0, 10)}.csv`
+    );
+    res.send(lines.join("\n"));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/withdrawal-requests/:requestId/settle", requireAdminMw, async (req, res) => {
+  const { requestId } = req.params;
+  const body = parseJsonBody(req);
+  const adminUserId = (req as AuthedRequest).authUserId;
+  const amountPaidRaw = body.amountPaidKes ?? body.amount_paid_kes;
+  const amountPaid =
+    typeof amountPaidRaw === "number" ? amountPaidRaw : parseFloat(String(amountPaidRaw ?? ""));
+  const payoutReference = asNonEmptyString(body.payoutReference ?? body.payout_reference) ?? "";
+  const adminNote = typeof body.adminNote === "string" ? body.adminNote : null;
+  const idempotencyKeyRaw = body.idempotencyKey ?? body.idempotency_key;
+  const idempotencyKey =
+    typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim().length > 0
+      ? idempotencyKeyRaw.trim().slice(0, 200)
+      : null;
+
+  if (!Number.isFinite(amountPaid) || amountPaid <= 0) {
+    return res.status(400).json({ error: "positive amountPaidKes required" });
+  }
+
+  try {
+    if (idempotencyKey) {
+      const { data: cached } = await supabaseAdmin
+        .from("admin_idempotency")
+        .select("result_json")
+        .eq("idempotency_key", idempotencyKey)
+        .maybeSingle();
+      if (cached?.result_json && typeof cached.result_json === "object") {
+        return res.json(cached.result_json as Record<string, unknown>);
+      }
+    }
+
+    const { data: wr, error: wErr } = await supabaseAdmin
+      .from("withdrawal_requests")
+      .select("*")
+      .eq("id", requestId)
+      .single();
+
+    if (wErr || !wr) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    if (wr.status !== "pending" && wr.status !== "paid_partial") {
+      return res.status(400).json({ error: "Request is not open for settlement" });
+    }
+
+    const userId = wr.user_id as string;
+    const requested = Number(wr.amount_kes_requested);
+    const alreadyPaid = Number(wr.amount_paid_kes || 0);
+    const remaining = Math.max(0, requested - alreadyPaid);
+
+    if (amountPaid > remaining + 1e-9) {
+      return res.status(400).json({
+        error: `Amount exceeds remaining owed (${remaining.toFixed(2)} KES)`,
+      });
+    }
+
+    const balance = await getEarningsBalanceKes(userId);
+    if (amountPaid > balance + 1e-9) {
+      return res.status(400).json({
+        error: `Amount exceeds user earnings balance (${balance.toFixed(2)} KES)`,
+      });
+    }
+
+    const newTotalPaid = alreadyPaid + amountPaid;
+    let newStatus: string = wr.status;
+    if (newTotalPaid >= requested - 1e-9) {
+      newStatus = "paid_full";
+    } else {
+      newStatus = "paid_partial";
+    }
+
+    const { error: ledErr } = await supabaseAdmin.from("earnings_ledger").insert({
+      user_id: userId,
+      amount_kes: -Math.round(amountPaid * 100) / 100,
+      entry_type: "withdrawal_payout",
+      reference_type: "withdrawal_request",
+      reference_id: requestId,
+      metadata: {
+        admin_user_id: adminUserId,
+        payout_reference: payoutReference || null,
+        admin_note: adminNote,
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+      },
+    });
+
+    if (ledErr) throw ledErr;
+
+    const { error: upErr } = await supabaseAdmin
+      .from("withdrawal_requests")
+      .update({
+        amount_paid_kes: Math.round(newTotalPaid * 100) / 100,
+        status: newStatus,
+        payout_reference: payoutReference || null,
+        admin_note: adminNote,
+        resolved_at: new Date().toISOString(),
+        resolved_by: adminUserId,
+      })
+      .eq("id", requestId);
+
+    if (upErr) throw upErr;
+
+    const payload = {
+      success: true,
+      status: newStatus,
+      requestId,
+      amountPaidKes: Math.round(amountPaid * 100) / 100,
+      amountPaidTotalKes: Math.round(newTotalPaid * 100) / 100,
+    };
+
+    if (idempotencyKey) {
+      const { error: idemErr } = await supabaseAdmin.from("admin_idempotency").insert({
+        idempotency_key: idempotencyKey,
+        operation: "withdrawal_settle",
+        result_json: payload,
+      });
+      if (idemErr?.code === "23505") {
+        const { data: row } = await supabaseAdmin
+          .from("admin_idempotency")
+          .select("result_json")
+          .eq("idempotency_key", idempotencyKey)
+          .single();
+        if (row?.result_json && typeof row.result_json === "object") {
+          return res.json(row.result_json as Record<string, unknown>);
+        }
+      } else if (idemErr) {
+        throw idemErr;
+      }
+    }
+
+    res.json(payload);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

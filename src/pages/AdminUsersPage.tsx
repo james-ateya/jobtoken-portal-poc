@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import {
   ArrowLeft,
@@ -16,6 +16,7 @@ import {
   FileText,
 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { apiFetch } from "../lib/apiFetch";
 
 interface ListedUser {
   id: string;
@@ -24,6 +25,8 @@ interface ListedUser {
   role: string;
   is_active: boolean | null;
   created_at: string | null;
+  employer_approval_status?: string | null;
+  employer_approved_at?: string | null;
 }
 
 async function tryParseAdminApiJson<T>(res: Response): Promise<{
@@ -56,7 +59,10 @@ async function readApiJson(res: Response): Promise<Record<string, unknown>> {
 }
 
 export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "success" | "error") => void }) {
-  const [roleTab, setRoleTab] = useState<"seeker" | "employer">("seeker");
+  const [searchParams] = useSearchParams();
+  const [roleTab, setRoleTab] = useState<"seeker" | "employer">(() =>
+    searchParams.get("tab") === "employer" ? "employer" : "seeker"
+  );
   const [users, setUsers] = useState<ListedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -67,7 +73,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const fetchUsers = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/users?role=${roleTab}`);
+      const res = await apiFetch(`/api/admin/users?role=${roleTab}`);
       const parsed = await tryParseAdminApiJson<{ users: ListedUser[] }>(res);
       if (parsed.htmlFallback) {
         showToast("Admin API unreachable. Use npm run dev on port 3000.", "error");
@@ -92,7 +98,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     setDetailPayload(null);
     setDetailLoading(true);
     try {
-      const res = await fetch(`/api/admin/user/${id}`);
+      const res = await apiFetch(`/api/admin/user/${id}`);
       const parsed = await tryParseAdminApiJson<Record<string, unknown>>(res);
       if (!res.ok || !parsed.data) {
         showToast("Could not load user details", "error");
@@ -117,7 +123,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     if (!confirm(isActive ? "Reactivate this account?" : "Deactivate this account? They will be signed out and blocked from signing in.")) return;
     setActionBusy(userId + "-act");
     try {
-      const res = await fetch("/api/admin/users/set-active", {
+      const res = await apiFetch("/api/admin/users/set-active", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId, isActive }),
@@ -139,6 +145,50 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     }
   };
 
+  const approveEmployer = async (userId: string) => {
+    if (
+      !confirm(
+        "Approve this employer? A temporary password will be set and a welcome email will be sent with the login link and credentials."
+      )
+    )
+      return;
+    setActionBusy(userId + "-appr");
+    try {
+      const res = await apiFetch(`/api/admin/employers/${userId}/approve`, { method: "POST" });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Approve failed"));
+      showToast("Employer approved — welcome email sent", "success");
+      closeDetail();
+      await fetchUsers();
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const rejectEmployer = async (userId: string) => {
+    if (
+      !confirm(
+        "Reject this employer registration? Their account will be deactivated and they cannot post jobs."
+      )
+    )
+      return;
+    setActionBusy(userId + "-rej");
+    try {
+      const res = await apiFetch(`/api/admin/employers/${userId}/reject`, { method: "POST" });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Reject failed"));
+      showToast("Employer registration rejected", "success");
+      closeDetail();
+      await fetchUsers();
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   const deleteUser = async (userId: string) => {
     if (
       !confirm(
@@ -148,7 +198,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
       return;
     setActionBusy(userId + "-del");
     try {
-      const res = await fetch("/api/admin/users/delete", {
+      const res = await apiFetch("/api/admin/users/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),
@@ -254,6 +304,20 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                             Active
                           </span>
                         )}
+                        {u.role === "employer" ? (
+                          <p className="text-[10px] mt-2 font-bold uppercase tracking-wide text-zinc-500">
+                            Posting:{" "}
+                            <span
+                              className={cn(
+                                u.employer_approval_status === "approved" && "text-emerald-400",
+                                u.employer_approval_status === "pending" && "text-amber-400",
+                                u.employer_approval_status === "rejected" && "text-red-400"
+                              )}
+                            >
+                              {u.employer_approval_status || "—"}
+                            </span>
+                          </p>
+                        ) : null}
                       </td>
                       <td className="px-6 py-4 text-right">
                         <button
@@ -314,6 +378,21 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                       <p className="text-xl font-bold text-white">{String(profile.full_name || "—")}</p>
                       <p className="text-sm text-zinc-400">{String(profile.email || "")}</p>
                       <p className="text-xs text-zinc-500 capitalize">Role: {String(profile.role)}</p>
+                      {profile.role === "employer" ? (
+                        <p className="text-xs text-zinc-400 mt-1">
+                          Employer posting status:{" "}
+                          <span className="text-white font-semibold capitalize">
+                            {String(profile.employer_approval_status ?? "—")}
+                          </span>
+                          {profile.employer_approved_at ? (
+                            <span className="text-zinc-500">
+                              {" "}
+                              · Approved{" "}
+                              {new Date(String(profile.employer_approved_at)).toLocaleString()}
+                            </span>
+                          ) : null}
+                        </p>
+                      ) : null}
                       <p className="text-xs text-zinc-500">
                         Joined:{" "}
                         {profile.created_at
@@ -413,6 +492,37 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                     </div>
 
                     <div className="flex flex-wrap gap-3 pt-2">
+                      {profile.role === "employer" &&
+                      String(profile.employer_approval_status) === "pending" ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={!!actionBusy}
+                            onClick={() => detailId && approveEmployer(detailId)}
+                            className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50"
+                          >
+                            {actionBusy === detailId + "-appr" ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <CheckCircle className="w-4 h-4" />
+                            )}
+                            Approve employer
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!!actionBusy}
+                            onClick={() => detailId && rejectEmployer(detailId)}
+                            className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-red-500/40 text-red-400 font-bold hover:bg-red-500/10 disabled:opacity-50"
+                          >
+                            {actionBusy === detailId + "-rej" ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Ban className="w-4 h-4" />
+                            )}
+                            Reject
+                          </button>
+                        </>
+                      ) : null}
                       {profile.is_active === false ? (
                         <button
                           type="button"

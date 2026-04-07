@@ -11,6 +11,7 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
+import { apiFetch } from "../lib/apiFetch";
 import { cn } from "../lib/utils";
 
 interface Transaction {
@@ -162,11 +163,10 @@ export function WalletDashboard({
         amountKes = selectedPack?.kes ?? selectedKes;
       }
 
-      const res = await fetch("/api/mpesa/stk-push", {
+      const res = await apiFetch("/api/mpesa/stk-push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId,
           phoneNumber: phone,
           amountKes,
         }),
@@ -190,10 +190,10 @@ export function WalletDashboard({
     setSimLoading(true);
     setStkHint(null);
     try {
-      const res = await fetch("/api/topup", {
+      const res = await apiFetch("/api/topup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
+        body: JSON.stringify({}),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Simulate failed");

@@ -14,6 +14,8 @@ import {
   Star,
   Pencil,
   CalendarClock,
+  PenLine,
+  ShieldAlert,
 } from "lucide-react";
 import { ApplicationThread } from "../components/ApplicationThread";
 import {
@@ -23,6 +25,7 @@ import {
 import { cn } from "../lib/utils";
 import { BUSINESS_AREAS, areasFocusMatch } from "../lib/businessAreas";
 import { WalletDashboard } from "../components/WalletDashboard";
+import { apiFetch } from "../lib/apiFetch";
 
 interface Job {
   id: string;
@@ -83,12 +86,25 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [fullProfileApplicant, setFullProfileApplicant] = useState<Applicant | null>(null);
+  /** undefined = not loaded yet */
+  const [employerApprovalStatus, setEmployerApprovalStatus] = useState<string | null | undefined>(undefined);
+
+  const fetchEmployerApproval = async () => {
+    if (!user?.id) return;
+    const { data } = await supabase
+      .from("profiles")
+      .select("employer_approval_status")
+      .eq("id", user.id)
+      .maybeSingle();
+    setEmployerApprovalStatus(data?.employer_approval_status ?? null);
+  };
 
   useEffect(() => {
     if (user) {
       fetchEmployerJobs();
       fetchEmployerWallet();
       fetchNotifications();
+      fetchEmployerApproval();
     }
   }, [user]);
 
@@ -232,6 +248,15 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
   };
 
   const openCreateJobForm = () => {
+    if (employerApprovalStatus !== "approved") {
+      showToast(
+        employerApprovalStatus === "pending"
+          ? "Your employer account is pending admin approval. You can post jobs after you receive approval by email."
+          : "Your employer account is not approved to post jobs.",
+        "error"
+      );
+      return;
+    }
     setJobFormMode("create");
     setEditingJobId(null);
     setJobForm({
@@ -247,6 +272,10 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
   };
 
   const openEditJobForm = (job: Job) => {
+    if (employerApprovalStatus !== "approved") {
+      showToast("You cannot edit jobs until your employer account is approved.", "error");
+      return;
+    }
     setJobFormMode("edit");
     setEditingJobId(job.id);
     const ca = job.closes_at
@@ -283,11 +312,10 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     setPosting(true);
     try {
       if (jobFormMode === "create") {
-        const response = await fetch("/api/employer/post-job", {
+        const response = await apiFetch("/api/employer/post-job", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            userId: user.id,
             title: jobForm.title,
             description: jobForm.description,
             job_type: jobForm.job_type,
@@ -305,11 +333,10 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
         showToast("Job posted successfully!");
         fetchEmployerWallet();
       } else if (editingJobId) {
-        const response = await fetch("/api/employer/update-job", {
+        const response = await apiFetch("/api/employer/update-job", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            userId: user.id,
             jobId: editingJobId,
             title: jobForm.title,
             description: jobForm.description,
@@ -350,8 +377,34 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
     );
   }
 
+  const approvalOk = employerApprovalStatus === "approved";
+
   return (
     <main className="max-w-7xl mx-auto px-6 py-12">
+      {employerApprovalStatus === "pending" ? (
+        <div className="mb-8 flex gap-3 p-4 rounded-2xl border border-amber-500/35 bg-amber-500/10 text-amber-100 text-sm leading-relaxed">
+          <ShieldAlert className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+          <div>
+            <p className="font-bold text-amber-50">Awaiting administrator approval</p>
+            <p className="mt-1 text-amber-200/90">
+              New employer accounts are reviewed before you can post jobs or manage prompt series. When approved,
+              you will receive a welcome email with a sign-in link and a temporary password.
+            </p>
+          </div>
+        </div>
+      ) : null}
+      {employerApprovalStatus === "rejected" ? (
+        <div className="mb-8 flex gap-3 p-4 rounded-2xl border border-red-500/35 bg-red-500/10 text-red-200 text-sm leading-relaxed">
+          <ShieldAlert className="w-5 h-5 shrink-0 text-red-400 mt-0.5" />
+          <div>
+            <p className="font-bold text-red-100">Employer registration not approved</p>
+            <p className="mt-1 text-red-200/90">
+              This account cannot post jobs. Contact support if you believe this is a mistake.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-12">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Employer Portal</h1>
@@ -421,10 +474,23 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
               <Users className="w-5 h-5" />
               Manage All Applications
             </Link>
+            <Link
+              to="/dashboard/employer/prompts"
+              className="flex items-center justify-center gap-2 px-5 py-3 bg-white/5 text-white border border-white/10 rounded-xl font-bold hover:bg-white/10 transition-all active:scale-[0.98] text-sm"
+            >
+              <PenLine className="w-5 h-5" />
+              Prompt series
+            </Link>
             <button
               type="button"
               onClick={() => openCreateJobForm()}
-              className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500 text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98]"
+              disabled={!approvalOk}
+              title={
+                !approvalOk
+                  ? "Available after an administrator approves your employer account"
+                  : undefined
+              }
+              className="flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500 text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none"
             >
               <Plus className="w-5 h-5" />
               Post a New Job
@@ -786,7 +852,8 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
                         <button
                           type="button"
                           onClick={() => openEditJobForm(job)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:bg-white/10"
+                          disabled={!approvalOk}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:bg-white/10 disabled:opacity-35 disabled:pointer-events-none"
                         >
                           <Pencil className="w-3.5 h-3.5" />
                           Edit
