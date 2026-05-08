@@ -303,18 +303,26 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
 
   const handleDeleteJob = async (jobId: string) => {
     if (!confirm("Are you sure you want to delete this job post?")) return;
-    
-    setDeletingJobId(jobId);
+    const trimmed = typeof jobId === "string" ? jobId.trim() : "";
+    if (
+      !trimmed ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)
+    ) {
+      showToast("Missing job id. Refresh the dashboard and try again.", "error");
+      return;
+    }
+
+    setDeletingJobId(trimmed);
     try {
       const response = await apiFetch("/api/admin/jobs/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId }),
+        body: JSON.stringify({ jobId: trimmed }),
       });
 
       if (response.ok) {
-        setJobs(jobs.filter(j => j.id !== jobId));
-        setAnalyticsReport(analyticsReport.filter(r => r.id !== jobId));
+        setJobs(jobs.filter(j => j.id !== trimmed));
+        setAnalyticsReport(analyticsReport.filter(r => r.id !== trimmed));
         showToast("Job deleted successfully");
       } else {
         throw new Error(await readApiErrorMessage(response));
@@ -748,10 +756,14 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
                           </div>
                         </td>
                         <td className="px-6 py-4 text-right">
-                          <button 
+                          <button
+                            type="button"
                             onClick={() => handleDeleteJob(report.id)}
-                            disabled={deletingJobId === report.id}
-                            className="p-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-all"
+                            title={report.id ? "Delete job" : "Cannot delete: refresh to load job id"}
+                            disabled={deletingJobId === report.id || !report.id}
+                            className={cn(
+                              "p-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition-all disabled:opacity-40 disabled:pointer-events-none disabled:hover:bg-red-500/10"
+                            )}
                           >
                             {deletingJobId === report.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                           </button>

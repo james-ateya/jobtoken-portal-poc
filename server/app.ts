@@ -111,6 +111,42 @@ function asNonEmptyString(v: unknown): string | null {
   return t.length > 0 ? t : null;
 }
 
+const UUID_STRING_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuidString(s: string): boolean {
+  return UUID_STRING_RE.test(s);
+}
+
+/** Normalize `admin_analytics_report` view rows (often use job_id) to the shape the admin UI expects. */
+function normalizeAdminAnalyticsReportRow(row: Record<string, unknown>): {
+  id: string;
+  title: string;
+  category: string;
+  employer: string;
+  applicant_count: number;
+  posted_at: string;
+} {
+  const r = row as Record<string, unknown>;
+  const idRaw = r.id ?? r.job_id ?? r.jobId ?? r.job_uuid;
+  const id = idRaw != null && String(idRaw).trim() !== "" ? String(idRaw).trim() : "";
+  const ac = r.applicant_count ?? r.applicants;
+  return {
+    id,
+    title: r.title != null ? String(r.title) : "",
+    category: String(r.category ?? r.job_type ?? ""),
+    employer: String(r.employer ?? r.employer_name ?? r.posted_by_name ?? ""),
+    applicant_count:
+      typeof ac === "number" && Number.isFinite(ac) ? ac : parseInt(String(ac ?? "0"), 10) || 0,
+    posted_at:
+      r.posted_at != null
+        ? String(r.posted_at)
+        : r.created_at != null
+          ? String(r.created_at)
+          : "",
+  };
+}
+
 function parseJsonBody(req: { body?: unknown }): Record<string, unknown> {
   const b = req.body;
   if (Buffer.isBuffer(b)) {
@@ -1227,7 +1263,14 @@ app.post("/api/employer/update-job", requireApprovedEmployerMw, async (req, res)
 
 // --- Admin (JWT + admin role; see server/auth.ts) ---
 app.post("/api/admin/jobs/delete", requireAdminMw, async (req, res) => {
-  const { jobId } = req.body;
+  const body = parseJsonBody(req);
+  const jobId =
+    asNonEmptyString(body.jobId) ??
+    asNonEmptyString(body.job_id) ??
+    asNonEmptyString(typeof body.id === "string" ? body.id : null);
+  if (!jobId || !isUuidString(jobId)) {
+    return res.status(400).json({ error: "A valid job ID is required" });
+  }
   try {
     const { error } = await supabaseAdmin.from("jobs").delete().eq("id", jobId);
     if (error) throw error;
@@ -1784,7 +1827,10 @@ app.get("/api/admin/analytics-report", requireAdminMw, async (req, res) => {
       return res.json(report);
     }
 
-    res.json(data);
+    const rows = Array.isArray(data)
+      ? (data as Record<string, unknown>[]).map(normalizeAdminAnalyticsReportRow)
+      : [];
+    res.json(rows);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
