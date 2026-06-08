@@ -22,7 +22,10 @@ import { SeekerEarningsPage } from "./pages/SeekerEarningsPage";
 import { PromptSeriesBrowsePage } from "./pages/PromptSeriesBrowsePage";
 import { PromptSeriesDetailPage } from "./pages/PromptSeriesDetailPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { SiteFooter } from "./components/SiteFooter";
 import { ThemeMenu } from "./components/ThemeMenu";
+import { PrivacyPolicyPage } from "./pages/PrivacyPolicyPage";
+import { TermsOfUsePage } from "./pages/TermsOfUsePage";
 import { motion, AnimatePresence } from "motion/react";
 import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine } from "lucide-react";
 
@@ -250,6 +253,8 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/signup" element={<SignupPage />} />
+          <Route path="/privacy" element={<PrivacyPolicyPage />} />
+          <Route path="/terms" element={<TermsOfUsePage />} />
           <Route
             path="/dashboard/profile"
             element={
@@ -546,6 +551,8 @@ export default function App() {
           />
         </Routes>
         </div>
+
+        <SiteFooter />
       </div>
     </Router>
   );
