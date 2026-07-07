@@ -153,6 +153,35 @@ function envFirst(...keys: string[]): string | undefined {
   return undefined;
 }
 
+function isStkResponseSuccess(responseCode: unknown): boolean {
+  return String(responseCode) === "0";
+}
+
+/** Non-secret summary for health checks / debugging deployment env. */
+export function getMpesaConfigStatus() {
+  const shortcode = envFirst("MPESA_SHORTCODE", "VITE_MPESA_SHORTCODE");
+  const passkey = envFirst("MPESA_PASSKEY", "VITE_MPESA_PASSKEY");
+  const callbackUrl = envFirst("MPESA_CALLBACK_URL", "VITE_MPESA_CALLBACK_URL");
+  const consumerKey = envFirst("MPESA_CONSUMER_KEY", "VITE_MPESA_CONSUMER_KEY");
+  const consumerSecret = envFirst("MPESA_CONSUMER_SECRET", "VITE_MPESA_CONSUMER_SECRET");
+  const partyB = envFirst("MPESA_PARTYB", "VITE_MPESA_PARTYB") || shortcode;
+  return {
+    api_base: mpesaBaseUrl(),
+    env: process.env.MPESA_ENV === "production" ? "production" : "sandbox",
+    transaction_type: process.env.MPESA_TRANSACTION_TYPE || "CustomerPayBillOnline",
+    shortcode_set: Boolean(shortcode),
+    shortcode_last4: shortcode ? shortcode.slice(-4) : null,
+    party_b_set: Boolean(partyB),
+    party_b_last4: partyB && partyB !== shortcode ? partyB.slice(-4) : null,
+    passkey_set: Boolean(passkey),
+    callback_url_set: Boolean(callbackUrl),
+    callback_host: callbackUrl ? (() => { try { return new URL(callbackUrl).host; } catch { return null; } })() : null,
+    consumer_key_set: Boolean(consumerKey),
+    consumer_secret_set: Boolean(consumerSecret),
+    simulate: process.env.MPESA_SIMULATE === "true",
+  };
+}
+
 export async function initiateStkPush(params: {
   amountKes: number;
   phone254: string;
@@ -186,18 +215,24 @@ export async function initiateStkPush(params: {
   }
   const txType =
     process.env.MPESA_TRANSACTION_TYPE || "CustomerPayBillOnline";
+  const partyBRaw = envFirst("MPESA_PARTYB", "VITE_MPESA_PARTYB") || shortcode;
+  const businessShortCode = parseInt(shortcode!, 10);
+  const partyB = parseInt(partyBRaw, 10);
+  if (!Number.isFinite(businessShortCode) || !Number.isFinite(partyB)) {
+    throw new Error("MPESA_SHORTCODE and MPESA_PARTYB must be valid numeric short codes");
+  }
   const timestamp = formatTimestamp();
-  const password = buildPassword(shortcode, passkey, timestamp);
+  const password = buildPassword(shortcode!, passkey!, timestamp);
   const token = await getAccessToken();
 
   const body = {
-    BusinessShortCode: parseInt(shortcode, 10),
+    BusinessShortCode: businessShortCode,
     Password: password,
     Timestamp: timestamp,
     TransactionType: txType,
     Amount: Math.round(params.amountKes),
     PartyA: params.phone254,
-    PartyB: parseInt(shortcode, 10),
+    PartyB: partyB,
     PhoneNumber: params.phone254,
     CallBackURL: callbackUrl,
     AccountReference: params.accountReference.slice(0, 12),
@@ -219,17 +254,36 @@ export async function initiateStkPush(params: {
   const json = (await res.json()) as {
     MerchantRequestID?: string;
     CheckoutRequestID?: string;
-    ResponseCode?: string;
+    ResponseCode?: string | number;
     ResponseDescription?: string;
     CustomerMessage?: string;
     errorMessage?: string;
+    requestId?: string;
   };
 
-  if (!res.ok || json.ResponseCode !== "0") {
+  if (!res.ok || !isStkResponseSuccess(json.ResponseCode)) {
     const msg =
       json.ResponseDescription ||
+      json.CustomerMessage ||
       json.errorMessage ||
-      `STK Push failed (${res.status})`;
+      `STK Push failed (HTTP ${res.status}, code ${String(json.ResponseCode ?? "unknown")})`;
+    console.error("[mpesa] STK push rejected:", {
+      httpStatus: res.status,
+      responseCode: json.ResponseCode,
+      responseDescription: json.ResponseDescription,
+      customerMessage: json.CustomerMessage,
+      errorMessage: json.errorMessage,
+      transactionType: txType,
+      businessShortCode,
+      partyB,
+      callbackHost: (() => {
+        try {
+          return new URL(callbackUrl!).host;
+        } catch {
+          return callbackUrl;
+        }
+      })(),
+    });
     throw new Error(msg);
   }
 
@@ -239,7 +293,7 @@ export async function initiateStkPush(params: {
 
   return {
     checkoutRequestId: json.CheckoutRequestID,
-    responseCode: json.ResponseCode || "0",
+    responseCode: String(json.ResponseCode ?? "0"),
     customerMessage: json.CustomerMessage,
     merchantRequestId: json.MerchantRequestID,
   };

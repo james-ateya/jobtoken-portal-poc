@@ -13,6 +13,7 @@ import {
   getKesPerToken,
   getTokenPacks,
   getTopupKesBounds,
+  getMpesaConfigStatus,
   initiateStkPush,
   normalizeKenyaPhone,
   parseStkCallbackBody,
@@ -65,6 +66,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     uptime_s: Math.floor((Date.now() - serverStartedAt) / 1000),
+    mpesa: getMpesaConfigStatus(),
   });
 });
 
@@ -438,7 +440,14 @@ app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
       kes,
     });
   } catch (error: any) {
-    console.error("STK error:", error);
+    console.error("STK error:", error?.message || error);
+    const status = getMpesaConfigStatus();
+    if (!status.consumer_key_set || !status.consumer_secret_set) {
+      return res.status(500).json({
+        error:
+          "M-Pesa is not configured on this server. Set MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET in Vercel Environment Variables, then redeploy.",
+      });
+    }
     res.status(500).json({ error: error.message || "STK Push failed" });
   }
 });

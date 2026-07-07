@@ -25,6 +25,20 @@ interface Transaction {
 
 export type TokenPack = { kes: number; tokens: number };
 
+async function readWalletApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  const t = text.trim();
+  if (!t || t.startsWith("<")) {
+    return `Payment request failed (${res.status}). If you use Vercel, confirm M-Pesa env vars are set and redeploy.`;
+  }
+  try {
+    const j = JSON.parse(t) as { error?: string };
+    return j.error || `Payment request failed (${res.status})`;
+  } catch {
+    return t.slice(0, 200) || `Payment request failed (${res.status})`;
+  }
+}
+
 interface WalletDashboardProps {
   balance: number;
   onBalanceRefresh?: () => void;
@@ -171,8 +185,11 @@ export function WalletDashboard({
           amountKes,
         }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || "STK failed");
+      if (!res.ok) throw new Error(await readWalletApiError(res));
+      const json = (await res.json()) as {
+        customerMessage?: string;
+        checkoutRequestId?: string;
+      };
       setStkHint(
         json.customerMessage ||
           "Check your phone to approve M-Pesa. Your balance will update shortly."
