@@ -202,7 +202,6 @@ export async function completePasswordReset(
 ): Promise<void> {
   const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
     password: newPassword,
-    email_confirm: true,
   });
   if (authErr) throw authErr;
 }
