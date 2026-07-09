@@ -74,7 +74,7 @@ export async function sendMail({ to, subject, html }: SendMailParams): Promise<v
       process.env.RESEND_FROM ||
       process.env.EMAIL_FROM ||
       process.env.SMTP_FROM ||
-      "JobToken <onboarding@resend.dev>";
+      "JobToken <noreply@jobtoken.co.ke>";
 
     const resend = getResend();
     const { error } = await resend.emails.send({

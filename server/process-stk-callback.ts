@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { StkCallbackParsed } from "./mpesa.js";
 import { resolveTokensForTopupKes } from "./mpesa.js";
+import { fulfillCouponBonus, getCouponSettings } from "./coupon.js";
 
 export type StkProcessResult =
   | { outcome: "ignored" }
@@ -9,7 +10,7 @@ export type StkProcessResult =
   | { outcome: "already_completed" }
   | { outcome: "duplicate_receipt" }
   | { outcome: "amount_too_small"; paidKes: number }
-  | { outcome: "credited"; tokens: number; newBalance: number }
+  | { outcome: "credited"; tokens: number; newBalance: number; couponBonusTokens?: number }
   | { outcome: "error"; message: string };
 
 /**
@@ -112,5 +113,26 @@ export async function processStkCallback(
     return { outcome: "error", message: upTx.message };
   }
 
-  return { outcome: "credited", tokens: tokensToCredit, newBalance };
+  let couponBonusTokens: number | undefined;
+  try {
+    const { data: walletRow } = await supabaseAdmin
+      .from("wallets")
+      .select("user_id")
+      .eq("id", wallet.id)
+      .single();
+
+    if (walletRow?.user_id) {
+      const settings = await getCouponSettings(supabaseAdmin);
+      if (paidKes >= settings.minTopupKes) {
+        const bonus = await fulfillCouponBonus(supabaseAdmin, walletRow.user_id, wallet.id);
+        if (bonus) {
+          couponBonusTokens = bonus.tokensAwarded;
+        }
+      }
+    }
+  } catch (couponErr) {
+    console.error("STK callback coupon bonus:", couponErr);
+  }
+
+  return { outcome: "credited", tokens: tokensToCredit, newBalance, couponBonusTokens };
 }

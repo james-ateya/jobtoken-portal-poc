@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { motion } from "motion/react";
-import { Lock, Loader2, KeyRound, ArrowLeft, Mail } from "lucide-react";
+import { Lock, Loader2, KeyRound, ArrowLeft, Mail, ShieldCheck } from "lucide-react";
 
 export function ResetPasswordPage() {
   const navigate = useNavigate();
@@ -14,11 +14,43 @@ export function ResetPasswordPage() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendNote, setResendNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const handleResend = async () => {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setError("Enter your email address first.");
+      return;
+    }
+    setResending(true);
+    setError(null);
+    setResendNote(null);
+    try {
+      const res = await fetch("/api/auth/password-reset/resend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmedEmail }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error("error" in data ? String(data.error) : "Could not resend code.");
+      }
+      setResendNote(
+        String(data.message || "If an account exists for that email, a new code was sent.")
+      );
+    } catch (err: any) {
+      setError(err.message || "Could not resend code.");
+    } finally {
+      setResending(false);
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    setResendNote(null);
 
     if (password.length < 6) {
       setError("Password must be at least 6 characters.");
@@ -71,9 +103,9 @@ export function ResetPasswordPage() {
             <KeyRound className="w-6 h-6" />
           </div>
           <h1 className="text-2xl font-bold">Reset password</h1>
-          <p className="text-zinc-500 text-sm mt-2">
-            Enter the code from your email and choose a new password. You will sign in on the next
-            step.
+          <p className="text-zinc-500 text-sm mt-2 leading-relaxed">
+            Step 1: verify the 6-digit code from your email. Step 2: choose a new password. This
+            applies to job seekers, employers, and administrators.
           </p>
         </div>
 
@@ -95,22 +127,29 @@ export function ResetPasswordPage() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium text-zinc-400 ml-1">6-digit code</label>
+            <label className="text-sm font-medium text-zinc-400 ml-1">6-digit verification code</label>
             <div className="relative">
-              <KeyRound className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-500" />
+              <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-500" />
               <input
                 type="text"
                 inputMode="numeric"
-                pattern="[0-9\s]*"
                 autoComplete="one-time-code"
                 maxLength={12}
                 required
                 value={otp}
                 onChange={(e) => setOtp(e.target.value.replace(/[^\d\s]/g, ""))}
-                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:border-emerald-500 transition-colors font-mono tracking-widest"
+                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:border-emerald-500 transition-colors font-mono tracking-widest text-center"
                 placeholder="000000"
               />
             </div>
+            <button
+              type="button"
+              onClick={handleResend}
+              disabled={resending}
+              className="text-xs text-emerald-400 hover:text-emerald-300 font-medium disabled:opacity-50"
+            >
+              {resending ? "Sending…" : "Resend verification code"}
+            </button>
           </div>
 
           <div className="space-y-2">
@@ -147,6 +186,12 @@ export function ResetPasswordPage() {
             </div>
           </div>
 
+          {resendNote && (
+            <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-sm">
+              {resendNote}
+            </div>
+          )}
+
           {error && (
             <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
               {error}
@@ -158,7 +203,7 @@ export function ResetPasswordPage() {
             disabled={loading}
             className="w-full py-4 bg-white text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-60"
           >
-            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Update password"}
+            {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Verify code and update password"}
           </button>
         </form>
 

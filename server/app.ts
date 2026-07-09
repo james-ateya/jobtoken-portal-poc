@@ -1,9 +1,26 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { normalizeEmail } from "./auth-otp.js";
+import { sendSeekerWelcomeEmail } from "./seeker-welcome-email.js";
 import {
-  generateSixDigitOtp,
-  hashPasswordResetOtp,
-  normalizeEmail,
-} from "./password-reset-otp.js";
+  completePasswordReset,
+  issuePasswordResetOtp,
+  PASSWORD_RESET_GENERIC_MESSAGE,
+  resolvePasswordResetAccount,
+  verifyPasswordResetOtp,
+} from "./password-reset-flow.js";
+import {
+  createSeekerSessionTokens,
+  ensureEmployerProfile,
+  ensureSeekerProfile,
+  findAuthUserForSignupResume,
+  getProfileRole,
+  issueSeekerOtp,
+  sendSignupOtpOrThrow,
+  verifyPasswordAndGetUserId,
+  verifySeekerOtp,
+  type SeekerOtpPurpose,
+  type SignupRole,
+} from "./seeker-auth.js";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
@@ -29,6 +46,13 @@ import {
   requireSeeker,
   type AuthedRequest,
 } from "./auth.js";
+import {
+  generateCouponCode,
+  getCouponSettings,
+  linkCouponToUser,
+  fulfillCouponBonus,
+} from "./coupon.js";
+import { sendCouponBonusEmail } from "./coupon-bonus-email.js";
 
 const { loadedFiles } = loadProjectEnv();
 if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
@@ -113,6 +137,19 @@ function asNonEmptyString(v: unknown): string | null {
   return t.length > 0 ? t : null;
 }
 
+function asOptionalString(v: unknown): string | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v !== "string") return undefined;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+}
+
+function generateTempPassword(): string {
+  const raw = randomBytes(12).toString("base64url").replace(/[^a-zA-Z0-9]/g, "");
+  return `${(raw.slice(0, 10) || "JobToken01")}aA1`;
+}
+
 const UUID_STRING_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -174,6 +211,42 @@ function parseJsonBody(req: { body?: unknown }): Record<string, unknown> {
 function walletTokensNotExpired(expiresAt: string | null | undefined): boolean {
   if (expiresAt == null || expiresAt === "") return true;
   return new Date(expiresAt).getTime() >= Date.now();
+}
+
+/** User still holds spendable wallet tokens (balance > 0 and not past expiry). */
+function walletHasActiveTokens(
+  wallet: { token_balance?: number | null; expires_at?: string | null } | null | undefined
+): boolean {
+  if (!wallet) return false;
+  const balance = Number(wallet.token_balance) || 0;
+  if (balance <= 0) return false;
+  return walletTokensNotExpired(wallet.expires_at);
+}
+
+async function adminPurgeUserDataBeforeDelete(userId: string, role: string): Promise<void> {
+  if (role === "employer") {
+    const { data: jobs } = await supabaseAdmin.from("jobs").select("id").eq("posted_by", userId);
+    const jobIds = (jobs ?? []).map((j) => j.id as string);
+    if (jobIds.length > 0) {
+      await supabaseAdmin.from("applications").delete().in("job_id", jobIds);
+      await supabaseAdmin.from("jobs").delete().eq("posted_by", userId);
+    }
+  }
+
+  if (role === "seeker") {
+    await supabaseAdmin.from("applications").delete().eq("user_id", userId);
+  }
+
+  const { data: wallet } = await supabaseAdmin
+    .from("wallets")
+    .select("id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (wallet?.id) {
+    await supabaseAdmin.from("transactions").delete().eq("wallet_id", wallet.id);
+    await supabaseAdmin.from("wallets").delete().eq("id", wallet.id);
+  }
 }
 
 async function getFeatureJobTokens(): Promise<number> {
@@ -296,6 +369,328 @@ app.post("/api/auth/resend-verification", async (req, res) => {
   }
 });
 
+app.post("/api/auth/login", async (req, res) => {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  const password = asNonEmptyString(req.body?.password);
+  if (!emailRaw || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+
+  try {
+    const authResult = await verifyPasswordAndGetUserId(emailNormalized, password);
+    if ("error" in authResult) {
+      return res.status(401).json({ error: authResult.error });
+    }
+
+    const profile = await getProfileRole(supabaseAdmin, authResult.userId);
+    if (!profile) {
+      return res.status(403).json({ error: "Profile not found for this account" });
+    }
+    if (profile.is_active === false) {
+      return res.status(403).json({
+        error: "This account has been deactivated. Contact support if you believe this is a mistake.",
+      });
+    }
+
+    await issueSeekerOtp(supabaseAdmin, {
+      userId: authResult.userId,
+      email: emailNormalized,
+      purpose: "login",
+      role: profile.role,
+    });
+    return res.json({
+      success: true,
+      requiresOtp: true,
+      purpose: "login" as SeekerOtpPurpose,
+      email: emailNormalized,
+      message: "Enter the sign-in code sent to your email.",
+    });
+  } catch (error: any) {
+    console.error("login:", error);
+    res.status(500).json({ error: error.message || "Login failed" });
+  }
+});
+
+async function handleRoleSignup(
+  req: express.Request,
+  res: express.Response,
+  role: SignupRole
+): Promise<void> {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  const password = asNonEmptyString(req.body?.password);
+  const fullName = asNonEmptyString(req.body?.fullName);
+  const couponCode = role === "seeker" ? asNonEmptyString(req.body?.couponCode) : null;
+
+  if (!emailRaw || !password || !fullName) {
+    res.status(400).json({ error: "Email, password, and full name are required" });
+    return;
+  }
+  if (password.length < 6) {
+    res.status(400).json({ error: "Password must be at least 6 characters" });
+    return;
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+    res.status(400).json({ error: "Invalid email address" });
+    return;
+  }
+
+  try {
+    let userId: string;
+    let resumed = false;
+
+    const userMeta: Record<string, unknown> = { full_name: fullName, role };
+    if (couponCode) userMeta.coupon_code = couponCode;
+
+    const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+      email: emailNormalized,
+      password,
+      email_confirm: false,
+      user_metadata: userMeta,
+    });
+
+    if (createErr) {
+      const msg = createErr.message || "Could not create account";
+      if (!/already|registered|exists/i.test(msg)) {
+        throw createErr;
+      }
+
+      const found = await findAuthUserForSignupResume(supabaseAdmin, emailNormalized);
+      if (!found) {
+        res.status(400).json({
+          error: "An account with this email already exists. Sign in instead.",
+        });
+        return;
+      }
+
+      const { user } = found;
+      if (user.email_confirmed_at) {
+        res.status(400).json({
+          error: "An account with this email already exists. Sign in instead.",
+        });
+        return;
+      }
+
+      const existingProfile = await getProfileRole(supabaseAdmin, user.id);
+      const existingRole =
+        existingProfile?.role ||
+        (typeof user.user_metadata?.role === "string" ? user.user_metadata.role : null);
+      if (existingRole && existingRole !== role) {
+        res.status(400).json({
+          error: `This email is registered as a ${existingRole}. Sign in or use a different email.`,
+        });
+        return;
+      }
+
+      const resumeMeta: Record<string, unknown> = { full_name: fullName, role };
+      if (couponCode) resumeMeta.coupon_code = couponCode;
+
+      const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(user.id, {
+        password,
+        user_metadata: resumeMeta,
+      });
+      if (updateErr) throw updateErr;
+
+      userId = user.id;
+      resumed = true;
+    } else {
+      userId = created.user?.id || "";
+      if (!userId) throw new Error("User id missing after signup");
+    }
+
+    if (role === "seeker") {
+      await ensureSeekerProfile(supabaseAdmin, userId, emailNormalized, fullName);
+    } else {
+      await ensureEmployerProfile(supabaseAdmin, userId, emailNormalized, fullName);
+    }
+
+    let otpDeliveryFailed = false;
+    try {
+      await sendSignupOtpOrThrow(supabaseAdmin, {
+        userId,
+        email: emailNormalized,
+        role,
+      });
+    } catch (otpErr: any) {
+      otpDeliveryFailed = true;
+      console.error(`${role} signup OTP send failed:`, otpErr);
+    }
+
+    res.json({
+      success: true,
+      requiresOtp: true,
+      resumed,
+      otpDeliveryFailed,
+      purpose: "signup" as SeekerOtpPurpose,
+      email: emailNormalized,
+      message: otpDeliveryFailed
+        ? resumed
+          ? "We resent your verification setup. Email delivery failed — use Resend code on the next screen."
+          : "Account created. Email delivery failed — use Resend code on the next screen."
+        : resumed
+          ? "Verification code sent. Enter the code from your email to finish registration."
+          : "Account created. Enter the verification code sent to your email.",
+    });
+  } catch (error: any) {
+    console.error(`${role} signup:`, error);
+    res.status(500).json({ error: error.message || "Signup failed" });
+  }
+}
+
+app.post("/api/auth/seeker/signup", (req, res) => handleRoleSignup(req, res, "seeker"));
+app.post("/api/auth/employer/signup", (req, res) => handleRoleSignup(req, res, "employer"));
+
+app.post("/api/auth/verify-otp", handleVerifyAuthOtp);
+app.post("/api/auth/seeker/verify-otp", handleVerifyAuthOtp);
+
+async function handleVerifyAuthOtp(req: express.Request, res: express.Response) {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  const otpRaw = asNonEmptyString(req.body?.otp);
+  const purposeRaw = asNonEmptyString(req.body?.purpose);
+
+  if (!emailRaw || !otpRaw || !purposeRaw) {
+    return res.status(400).json({ error: "Email, code, and purpose are required" });
+  }
+  if (purposeRaw !== "signup" && purposeRaw !== "login") {
+    return res.status(400).json({ error: "Invalid verification purpose" });
+  }
+  const purpose = purposeRaw as SeekerOtpPurpose;
+  const emailNormalized = normalizeEmail(emailRaw);
+
+  try {
+    const { userId } = await verifySeekerOtp(
+      supabaseAdmin,
+      emailNormalized,
+      otpRaw,
+      purpose,
+      timingSafeEqual
+    );
+
+    if (purpose === "signup") {
+      const { error: confirmErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+        email_confirm: true,
+      });
+      if (confirmErr) throw confirmErr;
+    }
+
+    const profile = await getProfileRole(supabaseAdmin, userId);
+    if (!profile) {
+      return res.status(403).json({ error: "Profile not found for this account" });
+    }
+    if (profile.is_active === false) {
+      return res.status(403).json({ error: "This account has been deactivated." });
+    }
+
+    let pendingCouponBonus: { expiresAt: string; bonusTokens: number } | null = null;
+
+    if (purpose === "signup" && profile.role === "seeker") {
+      const { data: seekerProfile } = await supabaseAdmin
+        .from("profiles")
+        .select("full_name, email")
+        .eq("id", userId)
+        .maybeSingle();
+      const welcomeTo =
+        (seekerProfile?.email && seekerProfile.email.trim()) || emailNormalized;
+      const welcomeName =
+        (seekerProfile?.full_name && String(seekerProfile.full_name).trim()) || "there";
+      try {
+        await sendSeekerWelcomeEmail({ to: welcomeTo, fullName: welcomeName });
+      } catch (welcomeErr) {
+        console.error("seeker welcome email:", welcomeErr);
+      }
+
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(userId);
+      const couponCodeMeta =
+        typeof authUser?.user?.user_metadata?.coupon_code === "string"
+          ? authUser.user.user_metadata.coupon_code
+          : null;
+
+      if (couponCodeMeta) {
+        try {
+          const linkResult = await linkCouponToUser(supabaseAdmin, userId, couponCodeMeta);
+          if (linkResult) {
+            pendingCouponBonus = {
+              expiresAt: linkResult.expiresAt,
+              bonusTokens: linkResult.bonusTokens,
+            };
+            const settings = await getCouponSettings(supabaseAdmin);
+            try {
+              await sendCouponBonusEmail({
+                to: welcomeTo,
+                fullName: welcomeName,
+                bonusTokens: linkResult.bonusTokens,
+                expiresAt: linkResult.expiresAt,
+                minTopupKes: settings.minTopupKes,
+              });
+            } catch (couponEmailErr) {
+              console.error("coupon bonus email:", couponEmailErr);
+            }
+          }
+        } catch (couponErr) {
+          console.error("coupon link:", couponErr);
+        }
+
+        await supabaseAdmin.auth.admin.updateUserById(userId, {
+          user_metadata: { coupon_code: null },
+        });
+      }
+    }
+
+    const tokens = await createSeekerSessionTokens(supabaseAdmin, emailNormalized);
+    res.json({
+      success: true,
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      pendingCouponBonus,
+    });
+  } catch (error: any) {
+    console.error("verify-otp:", error);
+    res.status(400).json({ error: error.message || "Verification failed" });
+  }
+}
+
+app.post("/api/auth/resend-otp", handleResendAuthOtp);
+app.post("/api/auth/seeker/resend-otp", handleResendAuthOtp);
+
+async function handleResendAuthOtp(req: express.Request, res: express.Response) {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  const purposeRaw = asNonEmptyString(req.body?.purpose);
+  if (!emailRaw || !purposeRaw) {
+    return res.status(400).json({ error: "Email and purpose are required" });
+  }
+  if (purposeRaw !== "signup" && purposeRaw !== "login") {
+    return res.status(400).json({ error: "Invalid purpose" });
+  }
+  const purpose = purposeRaw as SeekerOtpPurpose;
+  const emailNormalized = normalizeEmail(emailRaw);
+
+  try {
+    const profile = await getProfileByEmailNormalized(emailNormalized);
+    if (!profile) {
+      return res.json({ success: true, message: "If the account exists, a new code was sent." });
+    }
+    const fullProfile = await getProfileRole(supabaseAdmin, profile.id);
+    if (!fullProfile) {
+      return res.json({ success: true, message: "If the account exists, a new code was sent." });
+    }
+    if (fullProfile.is_active === false) {
+      return res.json({ success: true, message: "If the account exists, a new code was sent." });
+    }
+
+    await issueSeekerOtp(supabaseAdmin, {
+      userId: profile.id,
+      email: emailNormalized,
+      purpose,
+      role: fullProfile.role,
+    });
+    res.json({ success: true, message: "A new code was sent to your email." });
+  } catch (error: any) {
+    console.error("resend-otp:", error);
+    res.status(500).json({ error: error.message || "Could not resend code" });
+  }
+}
+
 // --- Token packs (public) ---
 app.get("/api/token-packs", (_req, res) => {
   const bounds = getTopupKesBounds();
@@ -363,10 +758,65 @@ app.post("/api/topup", requireAuthMw, async (req, res) => {
 
     if (updateError) throw updateError;
 
-    res.json({ success: true, newBalance: wallet.token_balance + pack.tokens });
+    let couponBonusTokens = 0;
+    try {
+      const settings = await getCouponSettings(supabaseAdmin);
+      if (pack.kes >= settings.minTopupKes) {
+        const bonus = await fulfillCouponBonus(supabaseAdmin, userId, wallet.id);
+        if (bonus) couponBonusTokens = bonus.tokensAwarded;
+      }
+    } catch (couponErr) {
+      console.error("simulate topup coupon bonus:", couponErr);
+    }
+
+    res.json({
+      success: true,
+      newBalance: wallet.token_balance + pack.tokens + couponBonusTokens,
+      couponBonusTokens: couponBonusTokens || undefined,
+    });
   } catch (error: any) {
     console.error("Topup error:", error);
     res.status(500).json({ error: error.message || "Internal server error" });
+  }
+});
+
+// --- Coupon pending bonus check ---
+app.get("/api/coupon/pending-bonus", requireAuthMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
+  try {
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("coupon_id, role")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (!profile?.coupon_id || profile.role !== "seeker") {
+      return res.json({ pending: false });
+    }
+
+    const { data: coupon } = await supabaseAdmin
+      .from("coupons")
+      .select("id, bonus_tokens, is_revoked, expires_at")
+      .eq("id", profile.coupon_id)
+      .maybeSingle();
+
+    if (!coupon || coupon.is_revoked) {
+      return res.json({ pending: false });
+    }
+
+    const expired = new Date(coupon.expires_at) < new Date();
+    const settings = await getCouponSettings(supabaseAdmin);
+
+    return res.json({
+      pending: !expired,
+      expired,
+      bonusTokens: coupon.bonus_tokens,
+      expiresAt: coupon.expires_at,
+      minTopupKes: settings.minTopupKes,
+    });
+  } catch (err: any) {
+    console.error("coupon pending-bonus:", err);
+    res.json({ pending: false });
   }
 });
 
@@ -399,7 +849,7 @@ app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
   const tokensPreview = resolveTokensForTopupKes(kes);
   if (tokensPreview < 1) {
     return res.status(400).json({
-      error: `At least Ksh ${Math.ceil(kesPerToken)} required for 1 token (Ksh ${kesPerToken} per token)`,
+      error: `Minimum top-up is Ksh ${min}`,
     });
   }
 
@@ -604,10 +1054,6 @@ function escapeHtml(s: string) {
     .replace(/"/g, "&quot;");
 }
 
-const PASSWORD_RESET_OTP_TTL_MS = 15 * 60 * 1000;
-const PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 5;
-const PASSWORD_RESET_MAX_OTP_ATTEMPTS = 5;
-
 /** Case-insensitive profile lookup by email (avoids eq mismatch when casing differs). */
 async function getProfileByEmailNormalized(emailNormalized: string) {
   const { data, error } = await supabaseAdmin
@@ -617,6 +1063,18 @@ async function getProfileByEmailNormalized(emailNormalized: string) {
     .maybeSingle();
   if (error) throw error;
   return data as { id: string; email: string | null } | null;
+}
+
+async function handlePasswordResetRequest(
+  emailNormalized: string
+): Promise<{ sent: boolean; message: string }> {
+  const account = await resolvePasswordResetAccount(supabaseAdmin, emailNormalized);
+  if (!account || !account.isActive) {
+    return { sent: false, message: PASSWORD_RESET_GENERIC_MESSAGE };
+  }
+
+  await issuePasswordResetOtp(supabaseAdmin, account, emailNormalized);
+  return { sent: true, message: PASSWORD_RESET_GENERIC_MESSAGE };
 }
 
 app.post("/api/auth/password-reset/request", async (req, res) => {
@@ -629,71 +1087,42 @@ app.post("/api/auth/password-reset/request", async (req, res) => {
     return res.status(400).json({ error: "Invalid email address" });
   }
 
-  const genericMessage =
-    "If an account exists for that email, you will receive a verification code shortly.";
-
   try {
-    const profile = await getProfileByEmailNormalized(emailNormalized);
-    if (!profile) {
-      return res.json({ success: true, message: genericMessage });
-    }
-
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const { count, error: cntErr } = await supabaseAdmin
-      .from("password_reset_otps")
-      .select("*", { count: "exact", head: true })
-      .eq("email_normalized", emailNormalized)
-      .gte("created_at", oneHourAgo);
-
-    if (cntErr) throw cntErr;
-    if ((count ?? 0) >= PASSWORD_RESET_MAX_REQUESTS_PER_HOUR) {
-      return res.status(429).json({
-        error: "Too many reset requests for this email. Try again in about an hour.",
-      });
-    }
-
-    const otp = generateSixDigitOtp();
-    const otpHash = hashPasswordResetOtp(otp, emailNormalized);
-    const expiresAt = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MS).toISOString();
-
-    const { error: delErr } = await supabaseAdmin
-      .from("password_reset_otps")
-      .delete()
-      .eq("email_normalized", emailNormalized);
-    if (delErr) throw delErr;
-
-    const { error: insErr } = await supabaseAdmin.from("password_reset_otps").insert({
-      user_id: profile.id,
-      email_normalized: emailNormalized,
-      otp_hash: otpHash,
-      expires_at: expiresAt,
-      attempt_count: 0,
-    });
-    if (insErr) throw insErr;
-
-    const mailTo = (profile.email && profile.email.trim()) || emailNormalized;
-    const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
-    const resetPageUrl = `${appUrl}/reset-password`;
-
-    await sendMail({
-      to: mailTo,
-      subject: "Your JobToken password reset code",
-      html: `
-        <div style="font-family: system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
-          <h1 style="font-size: 20px; color: #059669;">Password reset</h1>
-          <p>Use this code to set a new password (expires in 15 minutes):</p>
-          <p style="font-size: 28px; font-weight: bold; letter-spacing: 0.25em; font-family: ui-monospace, monospace;">${escapeHtml(otp)}</p>
-          <p>Open the reset page, enter your email, this code, and your new password:</p>
-          <p><a href="${escapeHtml(resetPageUrl)}" style="color: #059669;">${escapeHtml(resetPageUrl)}</a></p>
-          <p style="font-size: 13px; color: #71717a;">If you did not request this, you can ignore this email.</p>
-        </div>
-      `,
-    });
-
-    return res.json({ success: true, message: genericMessage });
+    const result = await handlePasswordResetRequest(emailNormalized);
+    return res.json({ success: true, message: result.message });
   } catch (error: any) {
     console.error("password-reset request:", error);
+    if (/too many reset requests/i.test(error?.message || "")) {
+      return res.status(429).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || "Failed to process request" });
+  }
+});
+
+app.post("/api/auth/password-reset/resend", async (req, res) => {
+  const emailRaw = asNonEmptyString(req.body?.email);
+  if (!emailRaw) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+    return res.status(400).json({ error: "Invalid email address" });
+  }
+
+  try {
+    const result = await handlePasswordResetRequest(emailNormalized);
+    return res.json({
+      success: true,
+      message: result.sent
+        ? "A new verification code was sent to your email."
+        : PASSWORD_RESET_GENERIC_MESSAGE,
+    });
+  } catch (error: any) {
+    console.error("password-reset resend:", error);
+    if (/too many reset requests/i.test(error?.message || "")) {
+      return res.status(429).json({ error: error.message });
+    }
+    res.status(500).json({ error: error.message || "Could not resend code" });
   }
 });
 
@@ -706,68 +1135,27 @@ app.post("/api/auth/password-reset/confirm", async (req, res) => {
     return res.status(400).json({ error: "Email, code, and new password are required" });
   }
   const emailNormalized = normalizeEmail(emailRaw);
-  const otp = otpRaw.replace(/\s/g, "");
 
-  if (!/^\d{6}$/.test(otp)) {
-    return res.status(400).json({ error: "Enter the 6-digit code from your email" });
-  }
   if (newPassword.length < 6) {
     return res.status(400).json({ error: "Password must be at least 6 characters" });
   }
 
   try {
-    const { data: row, error: selErr } = await supabaseAdmin
-      .from("password_reset_otps")
-      .select("id, user_id, otp_hash, expires_at, attempt_count")
-      .eq("email_normalized", emailNormalized)
-      .gt("expires_at", new Date().toISOString())
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (selErr) throw selErr;
-    if (!row) {
-      return res.status(400).json({
-        error: "Invalid or expired code. Request a new code from Forgot password.",
-      });
-    }
-
-    const rowTyped = row as { id: string; user_id: string; otp_hash: string; attempt_count: number };
-
-    if (rowTyped.attempt_count >= PASSWORD_RESET_MAX_OTP_ATTEMPTS) {
-      await supabaseAdmin.from("password_reset_otps").delete().eq("id", rowTyped.id);
-      return res.status(400).json({ error: "Too many incorrect attempts. Request a new code." });
-    }
-
-    const expectedHash = rowTyped.otp_hash;
-    const actualHash = hashPasswordResetOtp(otp, emailNormalized);
-
-    const a = Buffer.from(expectedHash, "hex");
-    const b = Buffer.from(actualHash, "hex");
-    const matches = a.length === b.length && timingSafeEqual(a, b);
-
-    if (!matches) {
-      await supabaseAdmin
-        .from("password_reset_otps")
-        .update({ attempt_count: rowTyped.attempt_count + 1 })
-        .eq("id", rowTyped.id);
-      return res.status(400).json({ error: "Invalid code. Check the email and try again." });
-    }
-
-    const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(rowTyped.user_id, {
-      password: newPassword,
-    });
-    if (authErr) throw authErr;
-
-    await supabaseAdmin.from("password_reset_otps").delete().eq("email_normalized", emailNormalized);
+    const { userId } = await verifyPasswordResetOtp(
+      supabaseAdmin,
+      emailNormalized,
+      otpRaw,
+      timingSafeEqual
+    );
+    await completePasswordReset(supabaseAdmin, userId, newPassword);
 
     return res.json({
       success: true,
-      message: "Password updated. You can sign in with your new password.",
+      message: "Password updated. Sign in with your new password and the email verification code.",
     });
   } catch (error: any) {
     console.error("password-reset confirm:", error);
-    res.status(500).json({ error: error.message || "Could not reset password" });
+    res.status(400).json({ error: error.message || "Could not reset password" });
   }
 });
 
@@ -1431,10 +1819,10 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       .select(
         "id, email, full_name, role, is_active, created_at, employer_approval_status, employer_approved_at"
       )
-      .in("role", ["seeker", "employer"])
+      .in("role", ["seeker", "employer", "admin"])
       .order("email", { ascending: true });
 
-    if (role === "seeker" || role === "employer") {
+    if (role === "seeker" || role === "employer" || role === "admin") {
       q = q.eq("role", role);
     }
 
@@ -1443,6 +1831,183 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
     res.json({ users: data ?? [] });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/admins/create", requireAdminMw, async (req, res) => {
+  const body = parseJsonBody(req);
+  const emailRaw = asNonEmptyString(body.email);
+  const fullName = asNonEmptyString(body.fullName);
+  const phone = asOptionalString(body.phone);
+  const passwordInput = asNonEmptyString(body.password);
+
+  if (!emailRaw || !fullName) {
+    return res.status(400).json({ error: "Email and full name are required" });
+  }
+  const emailNormalized = normalizeEmail(emailRaw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+    return res.status(400).json({ error: "Invalid email address" });
+  }
+
+  const tempPassword = passwordInput || generateTempPassword();
+  if (tempPassword.length < 6) {
+    return res.status(400).json({ error: "Password must be at least 6 characters" });
+  }
+
+  try {
+    const existing = await getProfileByEmailNormalized(emailNormalized);
+    if (existing) {
+      return res.status(400).json({ error: "An account with this email already exists" });
+    }
+
+    const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+      email: emailNormalized,
+      password: tempPassword,
+      email_confirm: true,
+      user_metadata: { full_name: fullName, role: "admin" },
+    });
+    if (createErr) throw createErr;
+
+    const userId = created.user?.id;
+    if (!userId) throw new Error("User id missing after admin creation");
+
+    const profileRow: Record<string, unknown> = {
+      id: userId,
+      email: emailNormalized,
+      full_name: fullName,
+      role: "admin",
+      is_active: true,
+      employer_approval_status: null,
+      employer_approved_at: null,
+    };
+    if (phone !== undefined) profileRow.phone = phone;
+
+    const { error: profileErr } = await supabaseAdmin
+      .from("profiles")
+      .upsert(profileRow, { onConflict: "id" });
+    if (profileErr) throw profileErr;
+
+    const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+    const loginUrl = `${appUrl}/login`;
+    const name = escapeHtml(fullName);
+
+    await sendMail({
+      to: emailNormalized,
+      subject: "Your JobToken administrator account",
+      html: `
+        <div style="font-family: system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
+          <h1 style="font-size: 20px; color: #059669;">Administrator access</h1>
+          <p>Hi ${name},</p>
+          <p>An administrator account has been created for you on JobToken.</p>
+          <p style="margin: 16px 0;"><strong>Sign-in link:</strong><br/>
+            <a href="${escapeHtml(loginUrl)}" style="color: #059669;">${escapeHtml(loginUrl)}</a>
+          </p>
+          <p><strong>Username (email):</strong> ${escapeHtml(emailNormalized)}</p>
+          <p><strong>Temporary password:</strong> <code style="background:#f4f4f5;padding:4px 8px;border-radius:6px;">${escapeHtml(tempPassword)}</code></p>
+          <p style="font-size: 13px; color: #71717a;">You will receive a one-time email code each time you sign in. Change your password after your first login when account settings allow it.</p>
+        </div>
+      `,
+    });
+
+    res.json({
+      success: true,
+      userId,
+      message: "Administrator created. Welcome email sent with sign-in credentials.",
+    });
+  } catch (error: any) {
+    console.error("admin create:", error);
+    res.status(500).json({ error: error.message || "Could not create administrator" });
+  }
+});
+
+app.patch("/api/admin/users/:userId", requireAdminMw, async (req, res) => {
+  const { userId } = req.params;
+  if (!userId || !isUuidString(userId)) {
+    return res.status(400).json({ error: "Valid userId required" });
+  }
+
+  const body = parseJsonBody(req);
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (pErr || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role === "seeker") {
+      return res.status(403).json({
+        error: "Job seeker profiles cannot be edited here. Seekers manage their own profile.",
+      });
+    }
+    if (profile.role !== "employer" && profile.role !== "admin") {
+      return res.status(400).json({ error: "Only employer and admin accounts can be edited" });
+    }
+
+    const fullName = asOptionalString(body.fullName);
+    const emailRaw = asOptionalString(body.email);
+    const phone = asOptionalString(body.phone);
+    const location = asOptionalString(body.location);
+    const companyName = asOptionalString(body.companyName);
+    const officeLocation = asOptionalString(body.officeLocation);
+    const areaOfBusiness = asOptionalString(body.areaOfBusiness);
+    const linkedinUrl = asOptionalString(body.linkedinUrl);
+
+    const profileUpdate: Record<string, unknown> = {};
+
+    if (fullName !== undefined) profileUpdate.full_name = fullName;
+    if (phone !== undefined) profileUpdate.phone = phone;
+    if (location !== undefined) profileUpdate.location = location;
+    if (linkedinUrl !== undefined) profileUpdate.linkedin_url = linkedinUrl;
+
+    if (profile.role === "employer") {
+      if (companyName !== undefined) profileUpdate.company_name = companyName;
+      if (officeLocation !== undefined) profileUpdate.office_location = officeLocation;
+      if (areaOfBusiness !== undefined) profileUpdate.area_of_business = areaOfBusiness;
+    }
+
+    if (emailRaw !== undefined) {
+      if (!emailRaw) {
+        return res.status(400).json({ error: "Email cannot be empty" });
+      }
+      const newEmail = normalizeEmail(emailRaw);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      const currentEmail = normalizeEmail(String(profile.email || ""));
+      if (newEmail !== currentEmail) {
+        const taken = await getProfileByEmailNormalized(newEmail);
+        if (taken && taken.id !== userId) {
+          return res.status(400).json({ error: "Another account already uses this email" });
+        }
+        const { error: authUpErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+          email: newEmail,
+          email_confirm: true,
+        });
+        if (authUpErr) throw authUpErr;
+        profileUpdate.email = newEmail;
+      }
+    }
+
+    if (Object.keys(profileUpdate).length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    const { data: updated, error: upErr } = await supabaseAdmin
+      .from("profiles")
+      .update(profileUpdate)
+      .eq("id", userId)
+      .select("*")
+      .single();
+    if (upErr) throw upErr;
+
+    res.json({ success: true, profile: updated });
+  } catch (error: any) {
+    console.error("admin update user:", error);
+    res.status(500).json({ error: error.message || "Could not update user" });
   }
 });
 
@@ -1465,8 +2030,7 @@ app.post("/api/admin/employers/:userId/approve", requireAdminMw, async (req, res
       return res.status(400).json({ error: "Employer is already approved" });
     }
 
-    const raw = randomBytes(12).toString("base64url").replace(/[^a-zA-Z0-9]/g, "");
-    const tempPassword = `${(raw.slice(0, 10) || "JobToken01")}aA1`;
+    const tempPassword = generateTempPassword();
 
     const { error: authErr } = await supabaseAdmin.auth.admin.updateUserById(userId, {
       password: tempPassword,
@@ -1569,9 +2133,6 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
     if (pErr || !profile) {
       return res.status(404).json({ error: "User not found" });
     }
-    if (profile.role === "admin") {
-      return res.status(403).json({ error: "Admin profile summary is not exposed here" });
-    }
 
     const { data: wallet } = await supabaseAdmin
       .from("wallets")
@@ -1636,6 +2197,9 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
 
     const token_balance = Number(wallet?.token_balance) || 0;
     const active_tokens_kes_estimate = Math.round(token_balance * kesPerToken);
+    const tokens_active = walletHasActiveTokens(wallet);
+    const can_delete =
+      profile.role === "admin" ? true : profile.role === "employer" ? !tokens_active : !tokens_active;
 
     res.json({
       profile,
@@ -1650,6 +2214,8 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
         applications_count,
         jobs_posted_count,
         kes_per_token_estimate: kesPerToken,
+        tokens_active,
+        can_delete,
       },
     });
   } catch (error: any) {
@@ -1714,11 +2280,29 @@ app.post("/api/admin/users/delete", requireAdminMw, async (req, res) => {
       return res.status(403).json({ error: "Cannot delete admin accounts via this API" });
     }
 
+    const { data: wallet } = await supabaseAdmin
+      .from("wallets")
+      .select("token_balance, expires_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (walletHasActiveTokens(wallet)) {
+      return res.status(409).json({
+        error:
+          "This user still has active wallet tokens. Deactivate the account instead of deleting. Delete is only allowed after tokens expire or the balance is zero.",
+        tokens_active: true,
+        can_delete: false,
+      });
+    }
+
+    await adminPurgeUserDataBeforeDelete(userId, profile.role);
+
     const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(userId);
     if (delErr) throw delErr;
 
     res.json({ success: true });
   } catch (error: any) {
+    console.error("admin delete user:", error);
     res.status(500).json({ error: error.message || "Delete failed" });
   }
 });
@@ -2684,6 +3268,334 @@ app.post("/api/admin/withdrawal-requests/:requestId/settle", requireAdminMw, asy
     res.json(payload);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ========================================================================
+// Marketing: Marketers & Coupons (admin only)
+// ========================================================================
+
+app.get("/api/admin/marketers", requireAdminMw, async (_req, res) => {
+  try {
+    const { data: marketers, error } = await supabaseAdmin
+      .from("marketers")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+
+    const result = [];
+    for (const m of marketers || []) {
+      const { count: couponsIssued } = await supabaseAdmin
+        .from("coupons")
+        .select("*", { count: "exact", head: true })
+        .eq("marketer_id", m.id);
+
+      const { data: couponIds } = await supabaseAdmin
+        .from("coupons")
+        .select("id")
+        .eq("marketer_id", m.id);
+      const ids = (couponIds || []).map((c: { id: string }) => c.id);
+
+      let totalConversions = 0;
+      let totalRegistrations = 0;
+      if (ids.length > 0) {
+        const { count: conversions } = await supabaseAdmin
+          .from("coupon_redemptions")
+          .select("*", { count: "exact", head: true })
+          .in("coupon_id", ids);
+        totalConversions = conversions || 0;
+
+        const { count: registrations } = await supabaseAdmin
+          .from("profiles")
+          .select("*", { count: "exact", head: true })
+          .in("coupon_id", ids);
+        totalRegistrations = registrations || 0;
+      }
+
+      result.push({
+        ...m,
+        coupons_issued: couponsIssued || 0,
+        total_conversions: totalConversions,
+        total_registrations: totalRegistrations,
+      });
+    }
+
+    res.json({ marketers: result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/marketers", requireAdminMw, async (req, res) => {
+  const adminId = (req as AuthedRequest).authUserId;
+  const fullName = asNonEmptyString(req.body?.fullName);
+  const phone = asOptionalString(req.body?.phone) ?? null;
+  const email = asOptionalString(req.body?.email) ?? null;
+  const notes = asOptionalString(req.body?.notes) ?? null;
+
+  if (!fullName) {
+    return res.status(400).json({ error: "Full name is required" });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("marketers")
+      .insert({
+        full_name: fullName,
+        phone,
+        email,
+        notes,
+        created_by: adminId,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ marketer: data, message: "Marketer created" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch("/api/admin/marketers/:id", requireAdminMw, async (req, res) => {
+  const { id } = req.params;
+  if (!id || !isUuidString(id)) {
+    return res.status(400).json({ error: "Invalid marketer ID" });
+  }
+
+  const updates: Record<string, unknown> = {};
+  const fullName = asOptionalString(req.body?.fullName);
+  if (fullName !== undefined) updates.full_name = fullName;
+  const phone = asOptionalString(req.body?.phone);
+  if (phone !== undefined) updates.phone = phone;
+  const email = asOptionalString(req.body?.email);
+  if (email !== undefined) updates.email = email;
+  const notes = asOptionalString(req.body?.notes);
+  if (notes !== undefined) updates.notes = notes;
+  if (typeof req.body?.isActive === "boolean") updates.is_active = req.body.isActive;
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("marketers")
+      .update(updates)
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ marketer: data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/admin/marketers/:id/report", requireAdminMw, async (req, res) => {
+  const { id } = req.params;
+  if (!id || !isUuidString(id)) {
+    return res.status(400).json({ error: "Invalid marketer ID" });
+  }
+
+  try {
+    const { data: marketer, error: mErr } = await supabaseAdmin
+      .from("marketers")
+      .select("*")
+      .eq("id", id)
+      .single();
+    if (mErr) throw mErr;
+
+    const { data: coupons, error: cErr } = await supabaseAdmin
+      .from("coupons")
+      .select("*")
+      .eq("marketer_id", id)
+      .order("created_at", { ascending: false });
+    if (cErr) throw cErr;
+
+    const couponDetails = [];
+    for (const c of coupons || []) {
+      const { data: redemptions } = await supabaseAdmin
+        .from("coupon_redemptions")
+        .select("user_id, tokens_awarded, redeemed_at")
+        .eq("coupon_id", c.id)
+        .order("redeemed_at", { ascending: false });
+
+      const users = [];
+      for (const r of redemptions || []) {
+        const { data: p } = await supabaseAdmin
+          .from("profiles")
+          .select("full_name, email")
+          .eq("id", r.user_id)
+          .maybeSingle();
+        users.push({
+          user_id: r.user_id,
+          full_name: p?.full_name || null,
+          email: p?.email || null,
+          tokens_awarded: r.tokens_awarded,
+          redeemed_at: r.redeemed_at,
+        });
+      }
+
+      const { count: registrations } = await supabaseAdmin
+        .from("profiles")
+        .select("*", { count: "exact", head: true })
+        .eq("coupon_id", c.id);
+
+      couponDetails.push({
+        ...c,
+        registrations: registrations || 0,
+        conversions: (redemptions || []).length,
+        converted_users: users,
+      });
+    }
+
+    res.json({ marketer, coupons: couponDetails });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/coupons/generate", requireAdminMw, async (req, res) => {
+  const adminId = (req as AuthedRequest).authUserId;
+  const marketerId = asNonEmptyString(req.body?.marketerId);
+
+  if (!marketerId || !isUuidString(marketerId)) {
+    return res.status(400).json({ error: "Valid marketer ID is required" });
+  }
+
+  try {
+    const { data: marketer } = await supabaseAdmin
+      .from("marketers")
+      .select("id, is_active")
+      .eq("id", marketerId)
+      .maybeSingle();
+
+    if (!marketer) {
+      return res.status(404).json({ error: "Marketer not found" });
+    }
+    if (!marketer.is_active) {
+      return res.status(400).json({ error: "Marketer is deactivated" });
+    }
+
+    const settings = await getCouponSettings(supabaseAdmin);
+    const bonusTokens =
+      typeof req.body?.bonusTokens === "number" && req.body.bonusTokens > 0
+        ? Math.floor(req.body.bonusTokens)
+        : settings.bonusTokens;
+    const maxRedemptions =
+      typeof req.body?.maxRedemptions === "number" && req.body.maxRedemptions > 0
+        ? Math.floor(req.body.maxRedemptions)
+        : null;
+
+    const expiresAt = new Date(Date.now() + settings.ttlHours * 60 * 60 * 1000).toISOString();
+
+    let code: string;
+    let attempts = 0;
+    while (true) {
+      code = generateCouponCode();
+      const { data: existing } = await supabaseAdmin
+        .from("coupons")
+        .select("id")
+        .eq("code", code)
+        .maybeSingle();
+      if (!existing) break;
+      attempts++;
+      if (attempts > 10) throw new Error("Could not generate a unique coupon code");
+    }
+
+    const { data: coupon, error } = await supabaseAdmin
+      .from("coupons")
+      .insert({
+        code,
+        marketer_id: marketerId,
+        bonus_tokens: bonusTokens,
+        expires_at: expiresAt,
+        max_redemptions: maxRedemptions,
+        created_by: adminId,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+
+    res.json({ coupon, message: `Coupon ${code} generated` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/admin/coupons", requireAdminMw, async (req, res) => {
+  const marketerFilter = asOptionalString(req.query?.marketerId as string);
+
+  try {
+    let query = supabaseAdmin
+      .from("coupons")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (marketerFilter && isUuidString(marketerFilter)) {
+      query = query.eq("marketer_id", marketerFilter);
+    }
+
+    const { data: coupons, error } = await query;
+    if (error) throw error;
+
+    const result = [];
+    for (const c of coupons || []) {
+      const { data: marketer } = await supabaseAdmin
+        .from("marketers")
+        .select("full_name")
+        .eq("id", c.marketer_id)
+        .maybeSingle();
+
+      const { count: conversions } = await supabaseAdmin
+        .from("coupon_redemptions")
+        .select("*", { count: "exact", head: true })
+        .eq("coupon_id", c.id);
+
+      const { count: registrations } = await supabaseAdmin
+        .from("profiles")
+        .select("*", { count: "exact", head: true })
+        .eq("coupon_id", c.id);
+
+      const now = new Date();
+      const expired = new Date(c.expires_at) < now;
+      let status: string;
+      if (c.is_revoked) status = "revoked";
+      else if (expired) status = "expired";
+      else status = "active";
+
+      result.push({
+        ...c,
+        marketer_name: marketer?.full_name || "Unknown",
+        conversions: conversions || 0,
+        registrations: registrations || 0,
+        status,
+      });
+    }
+
+    res.json({ coupons: result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/coupons/:id/revoke", requireAdminMw, async (req, res) => {
+  const { id } = req.params;
+  if (!id || !isUuidString(id)) {
+    return res.status(400).json({ error: "Invalid coupon ID" });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("coupons")
+      .update({ is_revoked: true })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ coupon: data, message: "Coupon revoked" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -4,6 +4,18 @@ import { supabase } from "../lib/supabase";
 import { motion } from "motion/react";
 import { LogIn, Mail, Lock, ArrowRight, Loader2 } from "lucide-react";
 
+async function readLoginApiError(res: Response): Promise<string> {
+  const text = await res.text();
+  const t = text.trim();
+  if (!t || t.startsWith("<")) return `Sign in failed (${res.status})`;
+  try {
+    const j = JSON.parse(t) as { error?: string };
+    return j.error || `Sign in failed (${res.status})`;
+  } catch {
+    return t.slice(0, 160);
+  }
+}
+
 export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -30,32 +42,35 @@ export function LoginPage() {
         throw new Error("Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment variables.");
       }
 
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = await res.json().catch(() => ({}));
 
-      if (error) {
-        setError(error.message);
-        if (error.message.toLowerCase().includes("email not confirmed")) {
+      if (!res.ok) {
+        if (data.error?.toLowerCase?.().includes("email not confirmed")) {
           setShowResend(true);
         }
-        setLoading(false);
-      } else {
-        const { data: sess } = await supabase.auth.getSession();
-        const uid = sess.session?.user?.id;
-        if (uid) {
-          const { data: prof } = await supabase
-            .from("profiles")
-            .select("is_active")
-            .eq("id", uid)
-            .maybeSingle();
-          if (prof && prof.is_active === false) {
-            await supabase.auth.signOut();
-            setError("This account has been deactivated. Contact support if you believe this is a mistake.");
-            setLoading(false);
-            return;
-          }
-        }
-        navigate("/");
+        throw new Error(data.error || (await readLoginApiError(res)));
       }
+
+      if (data.requiresOtp) {
+        setLoading(false);
+        navigate("/verify-otp", {
+          state: { email: data.email || email.trim().toLowerCase(), purpose: "login" as const },
+        });
+        return;
+      }
+
+      const { error: sessErr } = await supabase.auth.setSession({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+      });
+      if (sessErr) throw sessErr;
+
+      navigate("/");
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred during sign in.");
       setLoading(false);
@@ -97,11 +112,15 @@ export function LoginPage() {
           </div>
           <h1 className="text-2xl font-bold">Welcome Back</h1>
           <p className="text-zinc-500 text-sm mt-2">Enter your credentials to access your account</p>
+          <p className="text-xs text-zinc-600 mt-2">
+            After password sign-in, a one-time email code is required for all accounts.
+          </p>
         </div>
 
         {passwordJustReset && (
-          <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm text-center">
-            Password updated. Sign in with your new password.
+          <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm text-center leading-relaxed">
+            Password updated. Sign in with your new password — you will still receive a sign-in
+            verification code by email.
           </div>
         )}
 

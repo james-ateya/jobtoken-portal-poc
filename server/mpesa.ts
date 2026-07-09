@@ -41,9 +41,9 @@ export function tokensFromCustomKes(amountKes: number): number {
 
 export function getTopupKesBounds(): { min: number; max: number; kesPerToken: number } {
   const kesPerToken = getKesPerToken();
-  const defaultMin = Math.max(1, Math.ceil(kesPerToken));
+  const defaultMin = 100;
   const min = Math.max(
-    1,
+    defaultMin,
     parseInt(process.env.MPESA_MIN_TOPUP_KES || String(defaultMin), 10) || defaultMin
   );
   const max = Math.max(

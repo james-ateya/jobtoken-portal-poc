@@ -14,6 +14,9 @@ import {
   Wallet,
   Coins,
   FileText,
+  Shield,
+  UserPlus,
+  Pencil,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
@@ -58,10 +61,42 @@ async function readApiJson(res: Response): Promise<Record<string, unknown>> {
   }
 }
 
+type RoleTab = "seeker" | "employer" | "admin";
+
+interface EditUserForm {
+  fullName: string;
+  email: string;
+  phone: string;
+  location: string;
+  companyName: string;
+  officeLocation: string;
+  areaOfBusiness: string;
+  linkedinUrl: string;
+}
+
+interface AddAdminForm {
+  fullName: string;
+  email: string;
+  phone: string;
+  password: string;
+}
+
+const emptyEditForm = (): EditUserForm => ({
+  fullName: "",
+  email: "",
+  phone: "",
+  location: "",
+  companyName: "",
+  officeLocation: "",
+  areaOfBusiness: "",
+  linkedinUrl: "",
+});
+
 export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "success" | "error") => void }) {
   const [searchParams] = useSearchParams();
-  const [roleTab, setRoleTab] = useState<"seeker" | "employer">(() =>
-    searchParams.get("tab") === "employer" ? "employer" : "seeker"
+  const tabParam = searchParams.get("tab");
+  const [roleTab, setRoleTab] = useState<RoleTab>(() =>
+    tabParam === "employer" ? "employer" : tabParam === "admin" ? "admin" : "seeker"
   );
   const [users, setUsers] = useState<ListedUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,11 +104,21 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailPayload, setDetailPayload] = useState<Record<string, unknown> | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [editMode, setEditMode] = useState(false);
+  const [editForm, setEditForm] = useState<EditUserForm>(emptyEditForm);
+  const [addAdminOpen, setAddAdminOpen] = useState(false);
+  const [addAdminForm, setAddAdminForm] = useState<AddAdminForm>({
+    fullName: "",
+    email: "",
+    phone: "",
+    password: "",
+  });
 
-  const fetchUsers = async () => {
+  const fetchUsers = async (roleOverride?: RoleTab) => {
+    const role = roleOverride ?? roleTab;
     setLoading(true);
     try {
-      const res = await apiFetch(`/api/admin/users?role=${roleTab}`);
+      const res = await apiFetch(`/api/admin/users?role=${role}`);
       const parsed = await tryParseAdminApiJson<{ users: ListedUser[] }>(res);
       if (parsed.htmlFallback) {
         showToast("Admin API unreachable. Use npm run dev on port 3000.", "error");
@@ -117,6 +162,89 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const closeDetail = () => {
     setDetailId(null);
     setDetailPayload(null);
+    setEditMode(false);
+    setEditForm(emptyEditForm());
+  };
+
+  const startEdit = () => {
+    if (!profile) return;
+    setEditForm({
+      fullName: String(profile.full_name || ""),
+      email: String(profile.email || ""),
+      phone: String(profile.phone || ""),
+      location: String(profile.location || ""),
+      companyName: String(profile.company_name || ""),
+      officeLocation: String(profile.office_location || ""),
+      areaOfBusiness: String(profile.area_of_business || ""),
+      linkedinUrl: String(profile.linkedin_url || ""),
+    });
+    setEditMode(true);
+  };
+
+  const saveEdit = async (userId: string) => {
+    setActionBusy(userId + "-edit");
+    try {
+      const res = await apiFetch(`/api/admin/users/${userId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fullName: editForm.fullName.trim(),
+          email: editForm.email.trim(),
+          phone: editForm.phone.trim() || null,
+          location: editForm.location.trim() || null,
+          companyName: editForm.companyName.trim() || null,
+          officeLocation: editForm.officeLocation.trim() || null,
+          areaOfBusiness: editForm.areaOfBusiness.trim() || null,
+          linkedinUrl: editForm.linkedinUrl.trim() || null,
+        }),
+      });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Update failed"));
+      showToast("User details updated", "success");
+      setEditMode(false);
+      if (j.profile) {
+        setDetailPayload({
+          ...detailPayload,
+          profile: j.profile,
+        });
+      }
+      await fetchUsers();
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const createAdmin = async () => {
+    if (!addAdminForm.fullName.trim() || !addAdminForm.email.trim()) {
+      showToast("Full name and email are required", "error");
+      return;
+    }
+    setActionBusy("add-admin");
+    try {
+      const res = await apiFetch("/api/admin/admins/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fullName: addAdminForm.fullName.trim(),
+          email: addAdminForm.email.trim(),
+          phone: addAdminForm.phone.trim() || undefined,
+          password: addAdminForm.password.trim() || undefined,
+        }),
+      });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Could not create admin"));
+      showToast(String(j.message || "Administrator created"), "success");
+      setAddAdminOpen(false);
+      setAddAdminForm({ fullName: "", email: "", phone: "", password: "" });
+      setRoleTab("admin");
+      await fetchUsers("admin");
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setActionBusy(null);
+    }
   };
 
   const setActive = async (userId: string, isActive: boolean) => {
@@ -190,9 +318,16 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   };
 
   const deleteUser = async (userId: string) => {
+    if (summary?.can_delete === false) {
+      showToast(
+        "This user still has active wallet tokens. Deactivate the account instead of deleting.",
+        "error"
+      );
+      return;
+    }
     if (
       !confirm(
-        "Permanently delete this user and their auth account? Jobs or applications may be removed depending on database rules. This cannot be undone."
+        "Permanently delete this user and their auth account? Their jobs or applications will be removed. This cannot be undone."
       )
     )
       return;
@@ -233,9 +368,21 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
           </Link>
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Users</h1>
-            <p className="text-zinc-500 mt-1">Job seekers and employers — details, wallet summary, and access control.</p>
+            <p className="text-zinc-500 mt-1">
+              Job seekers, employers, and administrators — access control and profile management.
+            </p>
           </div>
         </div>
+        {roleTab === "admin" ? (
+          <button
+            type="button"
+            onClick={() => setAddAdminOpen(true)}
+            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 transition-colors"
+          >
+            <UserPlus className="w-4 h-4" />
+            Add administrator
+          </button>
+        ) : null}
       </div>
 
       <div className="flex gap-2 mb-8 p-1 bg-white/5 rounded-xl border border-white/10 w-fit">
@@ -260,6 +407,17 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
         >
           <Briefcase className="w-4 h-4" />
           Employers
+        </button>
+        <button
+          type="button"
+          onClick={() => setRoleTab("admin")}
+          className={cn(
+            "px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2",
+            roleTab === "admin" ? "bg-emerald-500 text-black" : "text-zinc-400 hover:text-white"
+          )}
+        >
+          <Shield className="w-4 h-4" />
+          Administrators
         </button>
       </div>
 
@@ -373,12 +531,133 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                   </div>
                 ) : profile ? (
                   <>
+                    {editMode && (profile.role === "employer" || profile.role === "admin") ? (
+                      <div className="space-y-4">
+                        <p className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+                          Edit {profile.role === "admin" ? "administrator" : "employer"}
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="space-y-1">
+                            <span className="text-xs text-zinc-500">Full name</span>
+                            <input
+                              value={editForm.fullName}
+                              onChange={(e) => setEditForm((f) => ({ ...f, fullName: e.target.value }))}
+                              className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-xs text-zinc-500">Email (username)</span>
+                            <input
+                              type="email"
+                              value={editForm.email}
+                              onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value }))}
+                              className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-xs text-zinc-500">Phone</span>
+                            <input
+                              value={editForm.phone}
+                              onChange={(e) => setEditForm((f) => ({ ...f, phone: e.target.value }))}
+                              className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-xs text-zinc-500">Location</span>
+                            <input
+                              value={editForm.location}
+                              onChange={(e) => setEditForm((f) => ({ ...f, location: e.target.value }))}
+                              className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                            />
+                          </label>
+                          {profile.role === "employer" ? (
+                            <>
+                              <label className="space-y-1 sm:col-span-2">
+                                <span className="text-xs text-zinc-500">Company name</span>
+                                <input
+                                  value={editForm.companyName}
+                                  onChange={(e) => setEditForm((f) => ({ ...f, companyName: e.target.value }))}
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                                />
+                              </label>
+                              <label className="space-y-1">
+                                <span className="text-xs text-zinc-500">Office location</span>
+                                <input
+                                  value={editForm.officeLocation}
+                                  onChange={(e) => setEditForm((f) => ({ ...f, officeLocation: e.target.value }))}
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                                />
+                              </label>
+                              <label className="space-y-1">
+                                <span className="text-xs text-zinc-500">Area of business</span>
+                                <input
+                                  value={editForm.areaOfBusiness}
+                                  onChange={(e) => setEditForm((f) => ({ ...f, areaOfBusiness: e.target.value }))}
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                                />
+                              </label>
+                            </>
+                          ) : null}
+                          <label className="space-y-1 sm:col-span-2">
+                            <span className="text-xs text-zinc-500">LinkedIn URL</span>
+                            <input
+                              value={editForm.linkedinUrl}
+                              onChange={(e) => setEditForm((f) => ({ ...f, linkedinUrl: e.target.value }))}
+                              className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                            />
+                          </label>
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                          <button
+                            type="button"
+                            disabled={!!actionBusy}
+                            onClick={() => detailId && saveEdit(detailId)}
+                            className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50"
+                          >
+                            {actionBusy === detailId + "-edit" ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <CheckCircle className="w-4 h-4" />
+                            )}
+                            Save changes
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditMode(false)}
+                            className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-white/15 text-zinc-300 font-bold hover:bg-white/5"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
                     <div className="space-y-1">
                       <p className="text-xs font-bold uppercase tracking-widest text-zinc-500">Profile</p>
                       <p className="text-xl font-bold text-white">{String(profile.full_name || "—")}</p>
                       <p className="text-sm text-zinc-400">{String(profile.email || "")}</p>
+                      {profile.phone ? (
+                        <p className="text-sm text-zinc-400">Phone: {String(profile.phone)}</p>
+                      ) : null}
+                      {profile.location ? (
+                        <p className="text-sm text-zinc-400">Location: {String(profile.location)}</p>
+                      ) : null}
                       <p className="text-xs text-zinc-500 capitalize">Role: {String(profile.role)}</p>
                       {profile.role === "employer" ? (
+                        <>
+                          {profile.company_name ? (
+                            <p className="text-sm text-zinc-400">Company: {String(profile.company_name)}</p>
+                          ) : null}
+                          {profile.office_location ? (
+                            <p className="text-sm text-zinc-400">
+                              Office: {String(profile.office_location)}
+                            </p>
+                          ) : null}
+                          {profile.area_of_business ? (
+                            <p className="text-sm text-zinc-400">
+                              Sector: {String(profile.area_of_business)}
+                            </p>
+                          ) : null}
                         <p className="text-xs text-zinc-400 mt-1">
                           Employer posting status:{" "}
                           <span className="text-white font-semibold capitalize">
@@ -392,6 +671,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                             </span>
                           ) : null}
                         </p>
+                        </>
                       ) : null}
                       <p className="text-xs text-zinc-500">
                         Joined:{" "}
@@ -401,6 +681,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                       </p>
                     </div>
 
+                    {profile.role !== "admin" ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="p-4 rounded-2xl border border-white/10 bg-white/[0.03]">
                         <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-widest mb-2">
@@ -421,6 +702,15 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                           ~Ksh {summary?.active_tokens_kes_estimate ?? 0} estimated value (
                           {summary?.kes_per_token_estimate ?? "—"} Ksh/token)
                         </p>
+                        {summary?.tokens_active ? (
+                          <p className="text-[11px] text-amber-400 mt-2 font-medium">
+                            Active tokens — deactivate only; delete after expiry or zero balance.
+                          </p>
+                        ) : (
+                          <p className="text-[11px] text-zinc-600 mt-2">
+                            No active tokens — account may be deleted.
+                          </p>
+                        )}
                       </div>
                       <div className="p-4 rounded-2xl border border-white/10 bg-white/[0.03]">
                         <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-widest mb-2">
@@ -458,7 +748,9 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                         </p>
                       </div>
                     </div>
+                    ) : null}
 
+                    {profile.role !== "admin" ? (
                     <div>
                       <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-widest mb-2">
                         <FileText className="w-4 h-4" />
@@ -490,8 +782,20 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                         )}
                       </div>
                     </div>
+                    ) : null}
 
                     <div className="flex flex-wrap gap-3 pt-2">
+                      {(profile.role === "employer" || profile.role === "admin") && !editMode ? (
+                        <button
+                          type="button"
+                          disabled={!!actionBusy}
+                          onClick={startEdit}
+                          className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-emerald-500/40 text-emerald-400 font-bold hover:bg-emerald-500/10 disabled:opacity-50"
+                        >
+                          <Pencil className="w-4 h-4" />
+                          Edit details
+                        </button>
+                      ) : null}
                       {profile.role === "employer" &&
                       String(profile.employer_approval_status) === "pending" ? (
                         <>
@@ -554,9 +858,14 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                       )}
                       <button
                         type="button"
-                        disabled={!!actionBusy}
+                        disabled={!!actionBusy || summary?.can_delete === false}
+                        title={
+                          summary?.can_delete === false
+                            ? "Delete only when wallet tokens have expired or balance is zero"
+                            : "Permanently delete user"
+                        }
                         onClick={() => deleteUser(detailId)}
-                        className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 font-bold hover:bg-red-500/25 disabled:opacity-50"
+                        className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 font-bold hover:bg-red-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         {actionBusy === detailId + "-del" ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -566,11 +875,96 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                         Delete user
                       </button>
                     </div>
+                      </>
+                    )}
                   </>
                 ) : (
                   <p className="text-zinc-500 text-center py-8">No data</p>
                 )}
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {addAdminOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => setAddAdminOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              className="w-full max-w-md rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl p-6 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-white">Add administrator</h2>
+                <button
+                  type="button"
+                  onClick={() => setAddAdminOpen(false)}
+                  className="p-2 rounded-full hover:bg-white/10 text-zinc-400"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-zinc-500">
+                Creates an admin account and emails sign-in credentials. Leave password blank to
+                auto-generate a temporary one.
+              </p>
+              <label className="block space-y-1">
+                <span className="text-xs text-zinc-500">Full name</span>
+                <input
+                  value={addAdminForm.fullName}
+                  onChange={(e) => setAddAdminForm((f) => ({ ...f, fullName: e.target.value }))}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs text-zinc-500">Email</span>
+                <input
+                  type="email"
+                  value={addAdminForm.email}
+                  onChange={(e) => setAddAdminForm((f) => ({ ...f, email: e.target.value }))}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs text-zinc-500">Phone (optional)</span>
+                <input
+                  value={addAdminForm.phone}
+                  onChange={(e) => setAddAdminForm((f) => ({ ...f, phone: e.target.value }))}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-xs text-zinc-500">Password (optional)</span>
+                <input
+                  type="password"
+                  value={addAdminForm.password}
+                  onChange={(e) => setAddAdminForm((f) => ({ ...f, password: e.target.value }))}
+                  placeholder="Auto-generated if empty"
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-3 text-sm"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={actionBusy === "add-admin"}
+                onClick={createAdmin}
+                className="w-full py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {actionBusy === "add-admin" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <UserPlus className="w-4 h-4" />
+                )}
+                Create administrator
+              </button>
             </motion.div>
           </motion.div>
         )}

@@ -7,7 +7,6 @@ export type SeriesCard = {
   id: string;
   title: string;
   description: string | null;
-  prompt_count: number;
 };
 
 export function PromptSeriesCards({
@@ -93,9 +92,6 @@ export function PromptSeriesCards({
                   {s.description ? (
                     <p className="text-xs text-zinc-500 mt-2 line-clamp-2">{s.description}</p>
                   ) : null}
-                  <p className="text-xs text-zinc-600 mt-3">
-                    {s.prompt_count} task{s.prompt_count === 1 ? "" : "s"}
-                  </p>
                 </div>
                 <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-emerald-400 shrink-0" />
               </div>

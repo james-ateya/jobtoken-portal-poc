@@ -45,23 +45,23 @@ export function ForgotPasswordPage() {
             <KeyRound className="w-6 h-6" />
           </div>
           <h1 className="text-2xl font-bold">Forgot password</h1>
-          <p className="text-zinc-500 text-sm mt-2">
-            Enter your email and we&apos;ll send a 6-digit code. Use it on the next page to set a new
-            password.
+          <p className="text-zinc-500 text-sm mt-2 leading-relaxed">
+            Enter your email and we&apos;ll send a 6-digit verification code. Works for job seeker,
+            employer, and administrator accounts.
           </p>
         </div>
 
         {sent ? (
           <div className="space-y-6 text-center">
-            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm">
+            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 text-sm leading-relaxed">
               If an account exists for <strong className="text-white">{email.trim()}</strong>, you
-              will receive a verification code shortly. Check your spam folder if you don&apos;t see
-              it.
+              will receive a verification code shortly. You must enter that code before your password
+              can be changed. Check your spam folder if you don&apos;t see it.
             </div>
             <button
               type="button"
               onClick={() =>
-                navigate("/reset-password", { state: { email: email.trim() } })
+                navigate("/reset-password", { state: { email: email.trim().toLowerCase() } })
               }
               className="w-full py-4 bg-white text-black rounded-xl font-bold hover:bg-emerald-400 transition-all active:scale-[0.98]"
             >

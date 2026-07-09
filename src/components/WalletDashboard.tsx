@@ -66,7 +66,7 @@ export function WalletDashboard({
   const [selectedKes, setSelectedKes] = useState(100);
   const [customAmount, setCustomAmount] = useState("");
   const [kesPerToken, setKesPerToken] = useState(20);
-  const [minTopupKes, setMinTopupKes] = useState(1);
+  const [minTopupKes, setMinTopupKes] = useState(100);
   const [maxTopupKes, setMaxTopupKes] = useState(150000);
   const [phone, setPhone] = useState("");
   const [stkLoading, setStkLoading] = useState(false);
@@ -405,7 +405,7 @@ export function WalletDashboard({
                           {previewTokens < 1 && (
                             <span className="text-red-400/90">
                               {" "}
-                              (min Ksh {Math.ceil(kesPerToken)} for 1 token)
+                              (minimum Ksh {minTopupKes})
                             </span>
                           )}
                         </>

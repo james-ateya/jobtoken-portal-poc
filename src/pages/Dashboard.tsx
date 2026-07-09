@@ -26,6 +26,7 @@ import {
   Search,
   Briefcase,
   PenLine,
+  Gift,
 } from "lucide-react";
 import { PromptSeriesCards } from "../components/PromptSeriesCards";
 import { cn } from "../lib/utils";
@@ -68,6 +69,13 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
   const [detailJob, setDetailJob] = useState<any | null>(null);
   const [companyProfileJob, setCompanyProfileJob] = useState<any | null>(null);
   const [isApplyingJobId, setIsApplyingJobId] = useState<string | null>(null);
+  const [pendingCoupon, setPendingCoupon] = useState<{
+    pending: boolean;
+    expired?: boolean;
+    bonusTokens?: number;
+    expiresAt?: string;
+    minTopupKes?: number;
+  } | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -79,6 +87,7 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
       fetchBoardJobs();
       fetchSeekerProfession();
       fetchUserApplicationIds();
+      fetchPendingCoupon();
     }
   }, [user]);
 
@@ -128,6 +137,22 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
   const fetchUserApplicationIds = async () => {
     const { data } = await supabase.from("applications").select("job_id").eq("user_id", user.id);
     setUserApplicationIds(data?.map((a) => a.job_id) ?? []);
+  };
+
+  const fetchPendingCoupon = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch("/api/coupon/pending-bonus", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPendingCoupon(data);
+      }
+    } catch {
+      // silent
+    }
   };
 
   const handleApplyFromBoard = async (jobId: string) => {
@@ -308,6 +333,52 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
       />
 
     <main className="max-w-7xl mx-auto px-6 py-12">
+      {pendingCoupon?.pending && pendingCoupon.bonusTokens && pendingCoupon.expiresAt && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8 p-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 flex items-start gap-4"
+        >
+          <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center shrink-0 mt-0.5">
+            <Gift className="w-5 h-5 text-amber-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold text-amber-300">
+              You have {pendingCoupon.bonusTokens} free tokens waiting!
+            </p>
+            <p className="text-xs text-amber-400/80 mt-1 leading-relaxed">
+              Top up at least Ksh {pendingCoupon.minTopupKes || 100} via M-Pesa before{" "}
+              <span className="font-bold text-amber-300">
+                {new Date(pendingCoupon.expiresAt).toLocaleString("en-KE", {
+                  weekday: "short",
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </span>{" "}
+              to claim your referral bonus. The bonus tokens will be added automatically on top of your purchase.
+            </p>
+          </div>
+        </motion.div>
+      )}
+
+      {pendingCoupon?.expired && (
+        <div className="mb-8 p-4 rounded-2xl border border-zinc-700/50 bg-zinc-800/30 flex items-center gap-3">
+          <Gift className="w-5 h-5 text-zinc-500 shrink-0" />
+          <p className="text-xs text-zinc-500">
+            Your referral bonus window has expired. You can still top up normally via M-Pesa.
+          </p>
+          <button
+            type="button"
+            onClick={() => setPendingCoupon(null)}
+            className="ml-auto text-zinc-600 hover:text-zinc-400 text-xs font-bold shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
         <div className="lg:col-span-4">
           <WalletDashboard

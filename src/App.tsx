@@ -6,6 +6,7 @@ import { LoginPage } from "./pages/Login";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
 import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 import { SignupPage } from "./pages/Signup";
+import { VerifyOtpPage } from "./pages/VerifyOtpPage";
 import { DashboardPage } from "./pages/Dashboard";
 import { EmployerDashboard } from "./pages/EmployerDashboard";
 import { EmployerApplicationsPage } from "./pages/EmployerApplications";
@@ -15,6 +16,7 @@ import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { AdminPromptGradingPage } from "./pages/AdminPromptGradingPage";
 import { AdminWithdrawalsPage } from "./pages/AdminWithdrawalsPage";
+import { AdminMarketingPage } from "./pages/AdminMarketingPage";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
 import { EmployerProfilePage } from "./pages/EmployerProfile";
 import { SeekerApplicationsPage } from "./pages/SeekerApplications";
@@ -253,6 +255,8 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/signup" element={<SignupPage />} />
+          <Route path="/verify-otp" element={<VerifyOtpPage />} />
+          <Route path="/verify-seeker" element={<VerifyOtpPage />} />
           <Route path="/privacy" element={<PrivacyPolicyPage />} />
           <Route path="/terms" element={<TermsOfUsePage />} />
           <Route
@@ -539,6 +543,22 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminWithdrawalsPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/marketing"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminMarketingPage showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
