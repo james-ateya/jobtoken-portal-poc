@@ -1,5 +1,4 @@
 import nodemailer from "nodemailer";
-import { Resend } from "resend";
 
 export type SendMailParams = {
   to: string | string[];
@@ -7,16 +6,12 @@ export type SendMailParams = {
   html: string;
 };
 
-/**
- * JobToken uses Resend by default when RESEND_API_KEY is set.
- * Set EMAIL_PROVIDER=smtp to use Nodemailer instead (full SMTP_* config required).
- */
-function resolveProvider(): "smtp" | "resend" {
+function resolveProvider(): "smtp" | "zeptomail" {
   const explicit = process.env.EMAIL_PROVIDER?.toLowerCase();
   if (explicit === "smtp") return "smtp";
-  if (explicit === "resend") return "resend";
+  if (explicit === "zeptomail") return "zeptomail";
 
-  if (process.env.RESEND_API_KEY) return "resend";
+  if (process.env.ZEPTOMAIL_TOKEN) return "zeptomail";
 
   const hasSmtp =
     process.env.SMTP_HOST &&
@@ -24,21 +19,47 @@ function resolveProvider(): "smtp" | "resend" {
     process.env.SMTP_PASS;
   if (hasSmtp) return "smtp";
 
-  return "resend";
+  return "zeptomail";
 }
 
-let resendSingleton: Resend | null = null;
-
-function getResend(): Resend {
-  if (!process.env.RESEND_API_KEY) {
+async function sendViaZeptomail(
+  recipients: string[],
+  subject: string,
+  html: string
+): Promise<void> {
+  const token = process.env.ZEPTOMAIL_TOKEN;
+  if (!token) {
     throw new Error(
-      "RESEND_API_KEY is required for email. Add it to .env or set EMAIL_PROVIDER=smtp with SMTP_* variables."
+      "ZEPTOMAIL_TOKEN is required for email. Add it to .env or set EMAIL_PROVIDER=smtp with SMTP_* variables."
     );
   }
-  if (!resendSingleton) {
-    resendSingleton = new Resend(process.env.RESEND_API_KEY);
+
+  const fromAddress = process.env.ZEPTOMAIL_FROM_ADDRESS || "admin@jobtoken.co.ke";
+  const fromName = process.env.ZEPTOMAIL_FROM_NAME || "JobToken";
+
+  const body = {
+    from: { address: fromAddress, name: fromName },
+    to: recipients.map((email) => ({
+      email_address: { address: email },
+    })),
+    subject,
+    htmlbody: html,
+  };
+
+  const res = await fetch("https://api.zeptomail.com/v1.1/email", {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Authorization": token,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.text();
+    throw new Error(`Zeptomail API error (${res.status}): ${errorBody}`);
   }
-  return resendSingleton;
 }
 
 function createSmtpTransport() {
@@ -50,7 +71,7 @@ function createSmtpTransport() {
 
   if (!host || !user || !pass) {
     throw new Error(
-      "SMTP_HOST, SMTP_USER, and SMTP_PASS are required when using SMTP (EMAIL_PROVIDER=smtp or no Resend key)."
+      "SMTP_HOST, SMTP_USER, and SMTP_PASS are required when using SMTP (EMAIL_PROVIDER=smtp or no Zeptomail key)."
     );
   }
 
@@ -62,28 +83,12 @@ function createSmtpTransport() {
   });
 }
 
-/**
- * Sends transactional email via Resend (default when RESEND_API_KEY is set) or SMTP.
- */
 export async function sendMail({ to, subject, html }: SendMailParams): Promise<void> {
   const recipients = Array.isArray(to) ? to : [to];
   const provider = resolveProvider();
 
-  if (provider === "resend") {
-    const from =
-      process.env.RESEND_FROM ||
-      process.env.EMAIL_FROM ||
-      process.env.SMTP_FROM ||
-      "JobToken <admin@jobtoken.co.ke>";
-
-    const resend = getResend();
-    const { error } = await resend.emails.send({
-      from,
-      to: recipients,
-      subject,
-      html,
-    });
-    if (error) throw error;
+  if (provider === "zeptomail") {
+    await sendViaZeptomail(recipients, subject, html);
     return;
   }
 
