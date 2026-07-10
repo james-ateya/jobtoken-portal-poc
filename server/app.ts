@@ -2134,10 +2134,6 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (profile.role === "admin") {
-      return res.status(403).json({ error: "Cannot view admin profile details" });
-    }
-
     const { data: wallet } = await supabaseAdmin
       .from("wallets")
       .select("*")
