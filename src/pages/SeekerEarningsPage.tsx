@@ -11,6 +11,8 @@ import {
   ArrowUpRight,
   CalendarClock,
   Download,
+  Coins,
+  Gift,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 
@@ -53,6 +55,8 @@ function entryLabel(type: string): string {
       return "Adjustment";
     case "reversal":
       return "Reversal";
+    case "token_redemption":
+      return "Token redemption";
     default:
       return type;
   }
@@ -72,11 +76,29 @@ export function SeekerEarningsPage({
   const [submitting, setSubmitting] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [amountInput, setAmountInput] = useState("");
+  const [nextWithdrawalWindow, setNextWithdrawalWindow] = useState<string | null>(null);
+  const [withdrawalWindowOpen, setWithdrawalWindowOpen] = useState(false);
+  const [withdrawalSchedule, setWithdrawalSchedule] = useState<string | null>(null);
+  const [minWithdrawalKes, setMinWithdrawalKes] = useState(5000);
+  const [canRequestWithdrawal, setCanRequestWithdrawal] = useState(false);
+  const [kesPerToken, setKesPerToken] = useState(20);
+  const [tokenExchangeEnabled, setTokenExchangeEnabled] = useState(false);
+  const [redeemAmount, setRedeemAmount] = useState("");
+  const [giftAmount, setGiftAmount] = useState("");
+  const [giftEmail, setGiftEmail] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
+  const [gifting, setGifting] = useState(false);
+
+  const previewTokens = (amountRaw: string): number => {
+    const amount = parseFloat(amountRaw.replace(/,/g, ""));
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    return Math.floor(amount / kesPerToken);
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [sumRes, ledRes, wrRes] = await Promise.all([
+      const [sumRes, ledRes, wrRes, exchangeRes] = await Promise.all([
         apiFetch("/api/earnings/summary"),
         apiFetch("/api/earnings/ledger?limit=50"),
         supabase
@@ -85,6 +107,7 @@ export function SeekerEarningsPage({
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(20),
+        apiFetch("/api/earnings/exchange-info"),
       ]);
 
       if (!sumRes.ok) {
@@ -93,6 +116,21 @@ export function SeekerEarningsPage({
       }
       const sumJson = await sumRes.json();
       setBalanceKes(Number(sumJson.balance_kes ?? 0));
+      setNextWithdrawalWindow(sumJson.next_withdrawal_window ?? null);
+      setWithdrawalWindowOpen(Boolean(sumJson.withdrawal_window_open));
+      setWithdrawalSchedule(sumJson.withdrawal_schedule ?? null);
+      setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 5000));
+      setCanRequestWithdrawal(Boolean(sumJson.can_request_withdrawal));
+
+      if (exchangeRes.ok) {
+        const exchangeJson = await exchangeRes.json();
+        setKesPerToken(Number(exchangeJson.kes_per_token ?? 20));
+        const redeemEnabled = Boolean(exchangeJson.redeem_enabled);
+        const giftEnabled = Boolean(exchangeJson.gift_enabled);
+        setTokenExchangeEnabled(redeemEnabled || giftEnabled);
+      } else {
+        setTokenExchangeEnabled(false);
+      }
 
       if (!ledRes.ok) {
         const j = await ledRes.json().catch(() => ({}));
@@ -117,9 +155,17 @@ export function SeekerEarningsPage({
 
   const handleWithdrawalRequest = async (e: FormEvent) => {
     e.preventDefault();
+    if (!withdrawalAllowed) {
+      showToast("Withdrawal requests are not available right now", "error");
+      return;
+    }
     const amount = parseFloat(amountInput.replace(/,/g, ""));
     if (!Number.isFinite(amount) || amount <= 0) {
       showToast("Enter a valid amount in KES", "error");
+      return;
+    }
+    if (amount < minWithdrawalKes) {
+      showToast(`Minimum withdrawal is Ksh ${minWithdrawalKes.toLocaleString("en-KE")}`, "error");
       return;
     }
     setSubmitting(true);
@@ -145,7 +191,78 @@ export function SeekerEarningsPage({
     }
   };
 
+  const handleRedeemForTokens = async (e: FormEvent) => {
+    e.preventDefault();
+    const amount = parseFloat(redeemAmount.replace(/,/g, ""));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast("Enter a valid amount in KES", "error");
+      return;
+    }
+    setRedeeming(true);
+    try {
+      const res = await apiFetch("/api/earnings/redeem-for-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amountKes: amount }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Redemption failed");
+      showToast(`Converted ${formatKes(json.amount_kes_debited)} KES into ${json.tokens_credited} tokens`, "success");
+      setRedeemAmount("");
+      await load();
+    } catch (error: any) {
+      showToast(error.message || "Could not redeem earnings", "error");
+    } finally {
+      setRedeeming(false);
+    }
+  };
+
+  const handleGiftTokens = async (e: FormEvent) => {
+    e.preventDefault();
+    const amount = parseFloat(giftAmount.replace(/,/g, ""));
+    const recipientEmail = giftEmail.trim();
+    if (!recipientEmail) {
+      showToast("Enter the recipient email address", "error");
+      return;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast("Enter a valid amount in KES", "error");
+      return;
+    }
+    setGifting(true);
+    try {
+      const res = await apiFetch("/api/earnings/gift-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amountKes: amount, recipientEmail }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Gift failed");
+      showToast(
+        `Gifted ${json.tokens_credited} tokens to ${json.recipient_email || recipientEmail}`,
+        "success"
+      );
+      setGiftAmount("");
+      setGiftEmail("");
+      await load();
+    } catch (error: any) {
+      showToast(error.message || "Could not gift tokens", "error");
+    } finally {
+      setGifting(false);
+    }
+  };
+
   const pendingWithdrawal = withdrawals.find((w) => w.status === "pending");
+  const balance = balanceKes ?? 0;
+  const withdrawalAllowed =
+    canRequestWithdrawal && !pendingWithdrawal;
+  const withdrawalBlockedReason = pendingWithdrawal
+    ? null
+    : !withdrawalWindowOpen
+      ? "window_closed"
+      : balance < minWithdrawalKes
+        ? "low_balance"
+        : null;
 
   const downloadStatementCsv = async () => {
     setExportingCsv(true);
@@ -233,9 +350,35 @@ export function SeekerEarningsPage({
                 <div>
                   <h2 className="font-semibold text-white">Request a withdrawal</h2>
                   <p className="text-sm text-zinc-500 mt-1">
-                    Requests typically open from day 25 of each month through month-end (see server{" "}
-                    <code className="text-zinc-400">EARNINGS_WITHDRAWAL_DAY_MIN</code>). If your
-                    request is rejected as outside the window, try again during that period.
+                    {withdrawalSchedule ||
+                      "Withdrawal requests open on the first Tuesday of each month (from August 2026)."}
+                    {nextWithdrawalWindow ? (
+                      <>
+                        {" "}
+                        Next window:{" "}
+                        <span className="text-zinc-300">
+                          {new Date(`${nextWithdrawalWindow}T00:00:00Z`).toLocaleDateString("en-KE", {
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
+                            timeZone: "UTC",
+                          })}
+                        </span>
+                        .
+                      </>
+                    ) : null}
+                  </p>
+                  {withdrawalWindowOpen ? (
+                    <p className="text-sm text-emerald-400 mt-2">
+                      The withdrawal window is open today.
+                    </p>
+                  ) : null}
+                  <p className="text-sm text-zinc-400 mt-2">
+                    Minimum withdrawal:{" "}
+                    <span className="text-white font-semibold tabular-nums">
+                      Ksh {minWithdrawalKes.toLocaleString("en-KE")}
+                    </span>
+                    . This helps batch payouts and gives the team time to prepare funds.
                   </p>
                 </div>
               </div>
@@ -246,19 +389,42 @@ export function SeekerEarningsPage({
                   {formatKes(pendingWithdrawal.amount_kes_requested)} KES (
                   {pendingWithdrawal.period_month}). The team will process it soon.
                 </div>
+              ) : !withdrawalAllowed ? (
+                <div className="rounded-xl bg-zinc-950/80 border border-zinc-700 px-4 py-3 text-sm text-zinc-300">
+                  {withdrawalBlockedReason === "window_closed" ? (
+                    <>
+                      Withdrawal requests are not open today. Check back on the next window date
+                      above.
+                    </>
+                  ) : withdrawalBlockedReason === "low_balance" ? (
+                    <>
+                      You need at least{" "}
+                      <strong>Ksh {minWithdrawalKes.toLocaleString("en-KE")}</strong> in earnings to
+                      request a withdrawal. Your current balance is{" "}
+                      <strong>Ksh {formatKes(balance)}</strong>.
+                    </>
+                  ) : (
+                    <>Withdrawal requests are not available right now.</>
+                  )}
+                </div>
               ) : (
                 <form onSubmit={handleWithdrawalRequest} className="flex flex-col sm:flex-row gap-3 mt-4">
                   <input
                     type="text"
                     inputMode="decimal"
-                    placeholder="Amount (KES)"
+                    placeholder={`Amount (KES, min ${minWithdrawalKes.toLocaleString("en-KE")})`}
                     value={amountInput}
                     onChange={(e) => setAmountInput(e.target.value)}
                     className="flex-1 rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
                   />
                   <button
                     type="submit"
-                    disabled={submitting}
+                    disabled={
+                      submitting ||
+                      (amountInput.trim() !== "" &&
+                        (parseFloat(amountInput.replace(/,/g, "")) < minWithdrawalKes ||
+                          !Number.isFinite(parseFloat(amountInput.replace(/,/g, "")))))
+                    }
                     className="rounded-xl bg-emerald-500 text-black font-semibold px-6 py-3 hover:bg-emerald-400 disabled:opacity-50 transition-colors"
                   >
                     {submitting ? "Submitting…" : "Submit request"}
@@ -266,6 +432,100 @@ export function SeekerEarningsPage({
                 </form>
               )}
             </section>
+
+            {tokenExchangeEnabled ? (
+              <>
+                <section className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
+                  <div className="flex items-start gap-3 mb-4">
+                    <Coins className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <h2 className="font-semibold text-white">Redeem earnings for tokens</h2>
+                      <p className="text-sm text-zinc-500 mt-1">
+                        Convert part of your KES balance into wallet tokens at {kesPerToken} KES per
+                        token. You do not need to wait for the monthly withdrawal window.
+                      </p>
+                    </div>
+                  </div>
+                  <form onSubmit={handleRedeemForTokens} className="space-y-3">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="Amount to redeem (KES)"
+                      value={redeemAmount}
+                      onChange={(e) => setRedeemAmount(e.target.value)}
+                      className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                    />
+                    {redeemAmount.trim() ? (
+                      <p className="text-xs text-zinc-400">
+                        You will receive <strong>{previewTokens(redeemAmount)}</strong> tokens (
+                        {formatKes(previewTokens(redeemAmount) * kesPerToken)} KES debited).
+                      </p>
+                    ) : null}
+                    <button
+                      type="submit"
+                      disabled={redeeming || previewTokens(redeemAmount) < 1}
+                      className="rounded-xl bg-emerald-500 text-black font-semibold px-6 py-3 hover:bg-emerald-400 disabled:opacity-50 transition-colors"
+                    >
+                      {redeeming ? "Redeeming…" : "Redeem for tokens"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
+                  <div className="flex items-start gap-3 mb-4">
+                    <Gift className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <h2 className="font-semibold text-white">Gift tokens from earnings</h2>
+                      <p className="text-sm text-zinc-500 mt-1">
+                        Buy tokens for another subscriber using their registered email address.
+                      </p>
+                    </div>
+                  </div>
+                  <form onSubmit={handleGiftTokens} className="space-y-3">
+                    <input
+                      type="email"
+                      placeholder="Recipient email"
+                      value={giftEmail}
+                      onChange={(e) => setGiftEmail(e.target.value)}
+                      className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                    />
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="Amount from earnings (KES)"
+                      value={giftAmount}
+                      onChange={(e) => setGiftAmount(e.target.value)}
+                      className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+                    />
+                    {giftAmount.trim() ? (
+                      <p className="text-xs text-zinc-400">
+                        Recipient will receive <strong>{previewTokens(giftAmount)}</strong> tokens.
+                      </p>
+                    ) : null}
+                    <button
+                      type="submit"
+                      disabled={gifting || previewTokens(giftAmount) < 1 || !giftEmail.trim()}
+                      className="rounded-xl bg-amber-500 text-black font-semibold px-6 py-3 hover:bg-amber-400 disabled:opacity-50 transition-colors"
+                    >
+                      {gifting ? "Sending gift…" : "Gift tokens"}
+                    </button>
+                  </form>
+                </section>
+              </>
+            ) : (
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 opacity-70">
+                <div className="flex items-start gap-3">
+                  <Coins className="w-5 h-5 text-zinc-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h2 className="font-semibold text-zinc-300">Redeem & gift tokens</h2>
+                    <p className="text-sm text-zinc-500 mt-1">
+                      Converting earnings into wallet tokens or gifting tokens to others is temporarily
+                      unavailable.
+                    </p>
+                  </div>
+                </div>
+              </section>
+            )}
 
             <section>
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">

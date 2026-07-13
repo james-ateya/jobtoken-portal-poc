@@ -17,9 +17,12 @@ import {
   Shield,
   UserPlus,
   Pencil,
+  ShieldBan,
+  Search,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
+import { AdminPagination } from "../components/AdminPagination";
 
 interface ListedUser {
   id: string;
@@ -30,24 +33,50 @@ interface ListedUser {
   created_at: string | null;
   employer_approval_status?: string | null;
   employer_approved_at?: string | null;
+  token_balance?: number;
+  days_since_registration?: number;
+  has_ever_topped_up?: boolean;
+  needs_topup_attention?: boolean;
+  is_blacklisted?: boolean;
+  blacklist_reason?: string | null;
+  blacklisted_at?: string | null;
+  deactivation_reason?: string | null;
 }
 
 async function tryParseAdminApiJson<T>(res: Response): Promise<{
   data: T | null;
   htmlFallback: boolean;
+  errorMessage?: string;
 }> {
   const text = await res.text();
-  if (!res.ok) return { data: null, htmlFallback: false };
   const t = text.trim();
-  if (!t) return { data: null, htmlFallback: false };
+  if (!t) {
+    return {
+      data: null,
+      htmlFallback: false,
+      errorMessage: res.ok ? undefined : "Empty response",
+    };
+  }
   const lower = t.slice(0, 32).toLowerCase();
   if (t.startsWith("<") || lower.startsWith("<!doctype") || lower.startsWith("<html")) {
     return { data: null, htmlFallback: true };
   }
   try {
-    return { data: JSON.parse(t) as T, htmlFallback: false };
+    const json = JSON.parse(t) as T & { error?: string };
+    if (!res.ok) {
+      return {
+        data: null,
+        htmlFallback: false,
+        errorMessage: json.error || "Request failed",
+      };
+    }
+    return { data: json as T, htmlFallback: false };
   } catch {
-    return { data: null, htmlFallback: false };
+    return {
+      data: null,
+      htmlFallback: false,
+      errorMessage: res.ok ? undefined : t.slice(0, 160),
+    };
   }
 }
 
@@ -113,20 +142,66 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     phone: "",
     password: "",
   });
+  const [reasonModal, setReasonModal] = useState<{
+    type: "deactivate" | "blacklist";
+    userId: string;
+  } | null>(null);
+  const [reasonText, setReasonText] = useState("");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalUsers, setTotalUsers] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const fetchUsers = async (roleOverride?: RoleTab) => {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = searchInput.trim().length >= 2 ? searchInput.trim() : "";
+      setSearchQuery((prev) => {
+        if (prev !== next) setPage(1);
+        return next;
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  const fetchUsers = async (roleOverride?: RoleTab, pageOverride?: number) => {
     const role = roleOverride ?? roleTab;
+    const activePage = pageOverride ?? page;
     setLoading(true);
     try {
-      const res = await apiFetch(`/api/admin/users?role=${role}`);
-      const parsed = await tryParseAdminApiJson<{ users: ListedUser[] }>(res);
+      const params = new URLSearchParams({
+        role,
+        page: String(activePage),
+        pageSize: String(pageSize),
+      });
+      if (searchQuery) params.set("q", searchQuery);
+      const res = await apiFetch(`/api/admin/users?${params.toString()}`);
+      const parsed = await tryParseAdminApiJson<{
+        users: ListedUser[];
+        total?: number;
+        totalPages?: number;
+        page?: number;
+        error?: string;
+      }>(res);
       if (parsed.htmlFallback) {
         showToast("Admin API unreachable. Use npm run dev on port 3000.", "error");
         setUsers([]);
         return;
       }
-      if (parsed.data?.users) setUsers(parsed.data.users);
-      else setUsers([]);
+      if (!res.ok) {
+        throw new Error(parsed.errorMessage || "Failed to load users");
+      }
+      if (parsed.data?.users) {
+        setUsers(parsed.data.users);
+        setTotalUsers(Number(parsed.data.total) ?? parsed.data.users.length);
+        setTotalPages(Math.max(1, Number(parsed.data.totalPages) || 1));
+        if (parsed.data.page) setPage(parsed.data.page);
+      } else {
+        setUsers([]);
+        setTotalUsers(0);
+        setTotalPages(1);
+      }
     } catch (e: any) {
       showToast(e.message || "Failed to load users", "error");
     } finally {
@@ -136,7 +211,67 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
 
   useEffect(() => {
     fetchUsers();
-  }, [roleTab]);
+  }, [roleTab, page, pageSize, searchQuery]);
+
+  const renderUserCells = (u: ListedUser) => (
+    <>
+      <td className="px-6 py-4">
+        <p className="font-bold text-white">{u.full_name || "—"}</p>
+        <p className="text-[10px] text-zinc-600 font-mono">{u.id.slice(0, 8)}…</p>
+        {u.needs_topup_attention ? (
+          <p className="text-[10px] mt-1 font-bold uppercase tracking-wide text-amber-400">
+            No top-up yet ({u.days_since_registration ?? 0}d)
+          </p>
+        ) : null}
+      </td>
+      <td className="px-6 py-4 text-sm text-zinc-300">{u.email}</td>
+      <td className="px-6 py-4 tabular-nums text-sm text-white font-semibold">
+        {u.token_balance ?? 0}
+      </td>
+      <td className="px-6 py-4 text-sm text-zinc-400 tabular-nums">
+        {u.days_since_registration ?? 0}
+      </td>
+      <td className="px-6 py-4">
+        {u.is_blacklisted ? (
+          <span className="text-xs font-bold uppercase tracking-wider text-red-300 bg-red-500/15 px-2 py-1 rounded-md border border-red-500/30">
+            Blacklisted
+          </span>
+        ) : u.is_active === false ? (
+          <span className="text-xs font-bold uppercase tracking-wider text-red-400 bg-red-500/10 px-2 py-1 rounded-md border border-red-500/20">
+            Deactivated
+          </span>
+        ) : (
+          <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md border border-emerald-500/20">
+            Active
+          </span>
+        )}
+        {u.role === "employer" ? (
+          <p className="text-[10px] mt-2 font-bold uppercase tracking-wide text-zinc-500">
+            Posting:{" "}
+            <span
+              className={cn(
+                u.employer_approval_status === "approved" && "text-emerald-400",
+                u.employer_approval_status === "pending" && "text-amber-400",
+                u.employer_approval_status === "rejected" && "text-red-400"
+              )}
+            >
+              {u.employer_approval_status || "—"}
+            </span>
+          </p>
+        ) : null}
+      </td>
+      <td className="px-6 py-4 text-right">
+        <button
+          type="button"
+          onClick={() => openDetail(u.id)}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/15 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+        >
+          <Eye className="w-4 h-4" />
+          Details
+        </button>
+      </td>
+    </>
+  );
 
   const openDetail = async (id: string) => {
     setDetailId(id);
@@ -247,24 +382,79 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     }
   };
 
-  const setActive = async (userId: string, isActive: boolean) => {
-    if (!confirm(isActive ? "Reactivate this account?" : "Deactivate this account? They will be signed out and blocked from signing in.")) return;
+  const setActive = async (userId: string, isActive: boolean, reason?: string) => {
+    if (isActive) {
+      if (!confirm("Reactivate this account? The user will regain full access (unless email is blacklisted).")) {
+        return;
+      }
+    }
     setActionBusy(userId + "-act");
     try {
       const res = await apiFetch("/api/admin/users/set-active", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, isActive }),
+        body: JSON.stringify({
+          userId,
+          isActive,
+          ...(reason ? { reason } : {}),
+        }),
       });
       const j = await readApiJson(res);
       if (!res.ok) throw new Error(String(j.error || "Failed"));
-      showToast(isActive ? "Account reactivated" : "Account deactivated");
+      showToast(
+        isActive
+          ? "Account reactivated"
+          : "Account deactivated — regret email sent with reactivation instructions"
+      );
       await fetchUsers();
-      if (detailId === userId && detailPayload) {
-        setDetailPayload({
-          ...detailPayload,
-          profile: { ...(detailPayload.profile as object), is_active: isActive },
-        });
+      if (detailId === userId) {
+        await openDetail(userId);
+      }
+    } catch (e: any) {
+      showToast(e.message, "error");
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const openDeactivateModal = (userId: string) => {
+    setReasonText("");
+    setReasonModal({ type: "deactivate", userId });
+  };
+
+  const openBlacklistModal = (userId: string) => {
+    setReasonText("");
+    setReasonModal({ type: "blacklist", userId });
+  };
+
+  const submitReasonAction = async () => {
+    if (!reasonModal) return;
+    const reason = reasonText.trim();
+    if (!reason) {
+      showToast("A reason is required", "error");
+      return;
+    }
+
+    if (reasonModal.type === "deactivate") {
+      setReasonModal(null);
+      await setActive(reasonModal.userId, false, reason);
+      return;
+    }
+
+    setActionBusy(reasonModal.userId + "-bl");
+    try {
+      const res = await apiFetch("/api/admin/users/blacklist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: reasonModal.userId, reason }),
+      });
+      const j = await readApiJson(res);
+      if (!res.ok) throw new Error(String(j.error || "Blacklist failed"));
+      showToast("User blacklisted — email permanently blocked", "success");
+      setReasonModal(null);
+      await fetchUsers();
+      if (detailId === reasonModal.userId) {
+        await openDetail(reasonModal.userId);
       }
     } catch (e: any) {
       showToast(e.message, "error");
@@ -298,7 +488,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const rejectEmployer = async (userId: string) => {
     if (
       !confirm(
-        "Reject this employer registration? Their account will be deactivated and they cannot post jobs."
+        "Reject this employer registration? Their account will be deactivated, a regret email will be sent, and they can reactivate by purchasing tokens."
       )
     )
       return;
@@ -327,7 +517,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     }
     if (
       !confirm(
-        "Permanently delete this user and their auth account? Their jobs or applications will be removed. This cannot be undone."
+        "Permanently delete this user? Their auth account, profile, jobs, applications, wallet data, and related records will be removed. This cannot be undone. (If the email was blacklisted, it will remain blocked.)"
       )
     )
       return;
@@ -353,7 +543,9 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const profile = detailPayload?.profile as Record<string, unknown> | undefined;
   const wallet = detailPayload?.wallet as Record<string, unknown> | null | undefined;
   const summary = detailPayload?.summary as Record<string, unknown> | undefined;
+  const blacklist = detailPayload?.blacklist as Record<string, unknown> | null | undefined;
   const transactions = (detailPayload?.transactions as unknown[]) ?? [];
+  const isBlacklisted = Boolean(blacklist?.email);
 
   return (
     <main className="max-w-7xl mx-auto px-6 py-12">
@@ -388,7 +580,10 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
       <div className="flex gap-2 mb-8 p-1 bg-white/5 rounded-xl border border-white/10 w-fit">
         <button
           type="button"
-          onClick={() => setRoleTab("seeker")}
+          onClick={() => {
+            setRoleTab("seeker");
+            setPage(1);
+          }}
           className={cn(
             "px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2",
             roleTab === "seeker" ? "bg-emerald-500 text-black" : "text-zinc-400 hover:text-white"
@@ -399,7 +594,10 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
         </button>
         <button
           type="button"
-          onClick={() => setRoleTab("employer")}
+          onClick={() => {
+            setRoleTab("employer");
+            setPage(1);
+          }}
           className={cn(
             "px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2",
             roleTab === "employer" ? "bg-emerald-500 text-black" : "text-zinc-400 hover:text-white"
@@ -410,7 +608,10 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
         </button>
         <button
           type="button"
-          onClick={() => setRoleTab("admin")}
+          onClick={() => {
+            setRoleTab("admin");
+            setPage(1);
+          }}
           className={cn(
             "px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2",
             roleTab === "admin" ? "bg-emerald-500 text-black" : "text-zinc-400 hover:text-white"
@@ -421,18 +622,55 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
         </button>
       </div>
 
+      {roleTab !== "admin" ? (
+        <p className="mb-4 text-xs text-zinc-500 flex items-center gap-2">
+          <span className="inline-block w-3 h-3 rounded-sm bg-amber-500/20 ring-1 ring-amber-500/40" />
+          Highlighted rows: registered more than 2 days ago with no token top-up yet.
+        </p>
+      ) : null}
+
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <label className="relative flex-1 min-w-[220px] max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search name or email (min 2 chars)"
+            className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder:text-zinc-600"
+          />
+        </label>
+        <label className="flex items-center gap-2 text-sm text-zinc-500">
+          <span>Per page</span>
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              setPageSize(Number(e.target.value));
+              setPage(1);
+            }}
+            className="rounded-lg bg-white/5 border border-white/10 px-2 py-1.5 text-white text-sm"
+          >
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </label>
+      </div>
+
       {loading ? (
         <div className="flex justify-center py-24">
           <Loader2 className="w-10 h-10 text-emerald-500 animate-spin" />
         </div>
       ) : (
         <div className="overflow-hidden rounded-3xl border border-white/10 bg-white/[0.02]">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[640px]">
-              <thead>
+          <div className="overflow-auto max-h-[640px]">
+            <table className="w-full text-left border-collapse min-w-[960px]">
+              <thead className="sticky top-0 z-10 bg-zinc-950/95 backdrop-blur">
                 <tr className="bg-white/5 border-b border-white/10">
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Name</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Email</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Tokens</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Member days</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Status</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right">Actions</th>
                 </tr>
@@ -440,59 +678,34 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
               <tbody>
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-16 text-center text-zinc-500">
-                      No users in this list.
+                    <td colSpan={6} className="px-6 py-16 text-center text-zinc-500">
+                      {searchQuery ? "No users match your search." : "No users in this list."}
                     </td>
                   </tr>
                 ) : (
                   users.map((u) => (
-                    <tr key={u.id} className="border-b border-white/5 hover:bg-white/[0.02]">
-                      <td className="px-6 py-4">
-                        <p className="font-bold text-white">{u.full_name || "—"}</p>
-                        <p className="text-[10px] text-zinc-600 font-mono">{u.id.slice(0, 8)}…</p>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-zinc-300">{u.email}</td>
-                      <td className="px-6 py-4">
-                        {u.is_active === false ? (
-                          <span className="text-xs font-bold uppercase tracking-wider text-red-400 bg-red-500/10 px-2 py-1 rounded-md border border-red-500/20">
-                            Deactivated
-                          </span>
-                        ) : (
-                          <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-md border border-emerald-500/20">
-                            Active
-                          </span>
-                        )}
-                        {u.role === "employer" ? (
-                          <p className="text-[10px] mt-2 font-bold uppercase tracking-wide text-zinc-500">
-                            Posting:{" "}
-                            <span
-                              className={cn(
-                                u.employer_approval_status === "approved" && "text-emerald-400",
-                                u.employer_approval_status === "pending" && "text-amber-400",
-                                u.employer_approval_status === "rejected" && "text-red-400"
-                              )}
-                            >
-                              {u.employer_approval_status || "—"}
-                            </span>
-                          </p>
-                        ) : null}
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => openDetail(u.id)}
-                          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/15 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-                        >
-                          <Eye className="w-4 h-4" />
-                          Details
-                        </button>
-                      </td>
+                    <tr
+                      key={u.id}
+                      className={cn(
+                        "border-b border-white/5 hover:bg-white/[0.02]",
+                        u.needs_topup_attention &&
+                          "bg-amber-500/[0.07] hover:bg-amber-500/[0.1] ring-1 ring-inset ring-amber-500/20"
+                      )}
+                    >
+                      {renderUserCells(u)}
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
+          <AdminPagination
+            page={page}
+            totalPages={totalPages}
+            total={totalUsers}
+            loading={loading}
+            onPageChange={setPage}
+          />
         </div>
       )}
 
@@ -678,7 +891,38 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                         {profile.created_at
                           ? new Date(String(profile.created_at)).toLocaleString()
                           : "—"}
+                        {users.find((u) => u.id === detailId)?.days_since_registration != null ? (
+                          <span className="text-zinc-600">
+                            {" "}
+                            · {users.find((u) => u.id === detailId)?.days_since_registration} days
+                            as member
+                          </span>
+                        ) : null}
                       </p>
+                      {isBlacklisted ? (
+                        <div className="rounded-xl bg-red-950/40 border border-red-500/30 px-4 py-3 text-sm text-red-100 space-y-1">
+                          <p className="font-semibold text-red-200">Email blacklisted — permanent ban</p>
+                          <p className="text-xs text-red-200/90">
+                            Reason: {String(blacklist?.reason || "—")}
+                          </p>
+                          <p className="text-xs text-red-300/80">
+                            This email cannot sign in, register, receive gifts, or reactivate via tokens.
+                          </p>
+                        </div>
+                      ) : profile.is_active === false ? (
+                        <div className="space-y-1">
+                          <p className="text-xs text-amber-400 font-medium">
+                            Account paused — user can sign in and reactivate by purchasing or receiving
+                            tokens.
+                          </p>
+                          {profile.deactivation_reason ? (
+                            <p className="text-xs text-zinc-500">
+                              Deactivation reason:{" "}
+                              <span className="text-zinc-300">{String(profile.deactivation_reason)}</span>
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
 
                     {profile.role !== "admin" ? (
@@ -784,6 +1028,18 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                     </div>
                     ) : null}
 
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-xs text-zinc-500 space-y-1">
+                      <p>
+                        <strong className="text-zinc-400">Deactivate</strong> — temporary pause; user may return via token top-up.
+                      </p>
+                      <p>
+                        <strong className="text-zinc-400">Blacklist</strong> — permanent email ban; no sign-in, signup, or gifts.
+                      </p>
+                      <p>
+                        <strong className="text-zinc-400">Delete</strong> — removes the account and all attached data permanently.
+                      </p>
+                    </div>
+
                     <div className="flex flex-wrap gap-3 pt-2">
                       {(profile.role === "employer" || profile.role === "admin") && !editMode ? (
                         <button
@@ -827,11 +1083,12 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                           </button>
                         </>
                       ) : null}
-                      {profile.is_active === false ? (
+                      {profile.role !== "admin" && !isBlacklisted ? (
+                        profile.is_active === false ? (
                         <button
                           type="button"
                           disabled={!!actionBusy}
-                          onClick={() => setActive(detailId, true)}
+                          onClick={() => detailId && setActive(detailId, true)}
                           className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-emerald-500 text-black font-bold hover:bg-emerald-400 disabled:opacity-50"
                         >
                           {actionBusy === detailId + "-act" ? (
@@ -845,7 +1102,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                         <button
                           type="button"
                           disabled={!!actionBusy}
-                          onClick={() => setActive(detailId, false)}
+                          onClick={() => detailId && openDeactivateModal(detailId)}
                           className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-amber-500/40 text-amber-400 font-bold hover:bg-amber-500/10 disabled:opacity-50"
                         >
                           {actionBusy === detailId + "-act" ? (
@@ -855,14 +1112,30 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                           )}
                           Deactivate
                         </button>
-                      )}
+                      )
+                      ) : null}
+                      {profile.role !== "admin" && !isBlacklisted ? (
+                        <button
+                          type="button"
+                          disabled={!!actionBusy}
+                          onClick={() => detailId && openBlacklistModal(detailId)}
+                          className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-red-500/50 text-red-300 font-bold hover:bg-red-500/10 disabled:opacity-50"
+                        >
+                          {actionBusy === detailId + "-bl" ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <ShieldBan className="w-4 h-4" />
+                          )}
+                          Blacklist
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         disabled={!!actionBusy || summary?.can_delete === false}
                         title={
                           summary?.can_delete === false
                             ? "Delete only when wallet tokens have expired or balance is zero"
-                            : "Permanently delete user"
+                            : "Permanently delete user and all attached data"
                         }
                         onClick={() => deleteUser(detailId)}
                         className="inline-flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 font-bold hover:bg-red-500/25 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -881,6 +1154,69 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                 ) : (
                   <p className="text-zinc-500 text-center py-8">No data</p>
                 )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {reasonModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => setReasonModal(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              className="w-full max-w-md rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-bold text-white">
+                {reasonModal.type === "blacklist" ? "Blacklist user" : "Deactivate account"}
+              </h3>
+              <p className="text-sm text-zinc-500 mt-2">
+                {reasonModal.type === "blacklist"
+                  ? "This email will be permanently blocked from JobToken. The user will receive a notification email."
+                  : "The account will be paused. The user may return by purchasing tokens. A regret email will be sent."}
+              </p>
+              <label className="block mt-4 space-y-2">
+                <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+                  Reason (required)
+                </span>
+                <textarea
+                  value={reasonText}
+                  onChange={(e) => setReasonText(e.target.value)}
+                  rows={4}
+                  placeholder="Explain why this action is being taken…"
+                  className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2.5 text-sm text-white placeholder:text-zinc-600 resize-y min-h-[96px]"
+                />
+              </label>
+              <div className="flex flex-wrap gap-3 mt-6 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setReasonModal(null)}
+                  className="px-4 py-2.5 rounded-xl border border-white/15 text-sm font-bold text-zinc-400 hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!!actionBusy || !reasonText.trim()}
+                  onClick={submitReasonAction}
+                  className={cn(
+                    "px-4 py-2.5 rounded-xl text-sm font-bold disabled:opacity-50",
+                    reasonModal.type === "blacklist"
+                      ? "bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30"
+                      : "bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30"
+                  )}
+                >
+                  {reasonModal.type === "blacklist" ? "Confirm blacklist" : "Confirm deactivate"}
+                </button>
               </div>
             </motion.div>
           </motion.div>

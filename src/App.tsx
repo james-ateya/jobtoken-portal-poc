@@ -16,6 +16,8 @@ import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { AdminPromptGradingPage } from "./pages/AdminPromptGradingPage";
 import { AdminWithdrawalsPage } from "./pages/AdminWithdrawalsPage";
+import { AdminPayoutPlanningPage } from "./pages/AdminPayoutPlanningPage";
+import { AdminPayoutUserDetailPage } from "./pages/AdminPayoutUserDetailPage";
 import { AdminMarketingPage } from "./pages/AdminMarketingPage";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
 import { EmployerProfilePage } from "./pages/EmployerProfile";
@@ -29,11 +31,12 @@ import { ThemeMenu } from "./components/ThemeMenu";
 import { PrivacyPolicyPage } from "./pages/PrivacyPolicyPage";
 import { TermsOfUsePage } from "./pages/TermsOfUsePage";
 import { motion, AnimatePresence } from "motion/react";
-import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine } from "lucide-react";
+import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine, PauseCircle } from "lucide-react";
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [accountInactive, setAccountInactive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -46,20 +49,11 @@ export default function App() {
         .single();
 
       if (!error && data) {
-        if (data.is_active === false) {
-          await supabase.auth.signOut();
-          setUser(null);
-          setUserRole(null);
-          setToast({
-            message:
-              "Your account has been deactivated. Contact support if you need access restored.",
-            type: "error",
-          });
-          setTimeout(() => setToast(null), 6000);
-          return;
-        }
         setUserRole(data.role);
+        setAccountInactive(data.is_active === false);
+        return;
       }
+      setAccountInactive(false);
     };
 
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -69,6 +63,7 @@ export default function App() {
         fetchProfile(currentUser.id);
       } else {
         setUserRole(null);
+        setAccountInactive(false);
       }
       setLoading(false);
     });
@@ -82,11 +77,30 @@ export default function App() {
         fetchProfile(currentUser.id);
       } else {
         setUserRole(null);
+        setAccountInactive(false);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const refreshAccountStatus = async () => {
+    if (!user?.id) return;
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role, is_active")
+      .eq("id", user.id)
+      .single();
+    if (!error && data) {
+      setUserRole(data.role);
+      setAccountInactive(data.is_active === false);
+    }
+  };
+
+  const handleAccountReactivated = () => {
+    setAccountInactive(false);
+    showToast("Your account has been reactivated. Welcome back!", "success");
+  };
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -248,6 +262,26 @@ export default function App() {
           </div>
         </nav>
 
+        {user && accountInactive ? (
+          <div className="bg-amber-500/15 border-b border-amber-500/30 px-6 py-3">
+            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-sm">
+              <div className="flex items-center gap-2 text-amber-200">
+                <PauseCircle className="w-4 h-4 shrink-0" />
+                <span>
+                  Your account is paused. Top up your wallet via M-Pesa (or receive a token gift) to
+                  reactivate automatically.
+                </span>
+              </div>
+              <Link
+                to={userRole === "employer" ? "/dashboard/employer" : "/dashboard"}
+                className="sm:ml-auto shrink-0 font-bold text-amber-300 hover:text-amber-200 underline underline-offset-2"
+              >
+                Open wallet
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
         <div className="dark:mx-0 dark:mb-0 dark:rounded-none dark:border-transparent dark:shadow-none mx-3 sm:mx-6 mb-6 mt-0 min-h-[calc(100vh-5rem)] rounded-2xl border border-zinc-300/70 bg-[#0a0a0a] text-white shadow-lg dark:shadow-none overflow-hidden">
         <Routes>
           <Route path="/" element={<HomePage user={user} showToast={showToast} />} />
@@ -395,7 +429,13 @@ export default function App() {
                     </Link>
                   </div>
                 ) : (
-                  <DashboardPage user={user} showToast={showToast} />
+                  <DashboardPage
+                    user={user}
+                    showToast={showToast}
+                    accountPaused={accountInactive}
+                    onAccountReactivated={handleAccountReactivated}
+                    onRefreshAccountStatus={refreshAccountStatus}
+                  />
                 )}
               </ProtectedRoute>
             } 
@@ -404,7 +444,13 @@ export default function App() {
             path="/dashboard/employer" 
             element={
               <ProtectedRoute user={user} loading={loading}>
-                <EmployerDashboard user={user} showToast={showToast} />
+                <EmployerDashboard
+                  user={user}
+                  showToast={showToast}
+                  accountPaused={accountInactive}
+                  onAccountReactivated={handleAccountReactivated}
+                  onRefreshAccountStatus={refreshAccountStatus}
+                />
               </ProtectedRoute>
             } 
           />
@@ -543,6 +589,38 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminWithdrawalsPage user={user} showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/payout-planning/:userId"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminPayoutUserDetailPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/payout-planning"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminPayoutPlanningPage showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />

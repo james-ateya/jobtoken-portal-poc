@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Loader2, Coins, Banknote } from "lucide-react";
+import { Loader2, Coins, Banknote, Clock } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
+
+const PROMPT_ANSWER_MAX_SECONDS = 30 * 60;
+
+function formatCountdown(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
 
 export type PromptForSubmit = {
   id: string;
@@ -44,21 +52,49 @@ export function PromptSubmitModal({
 }) {
   const [answer, setAnswer] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(PROMPT_ANSWER_MAX_SECONDS);
 
   useEffect(() => {
     if (open && prompt) setAnswer("");
   }, [open, prompt?.id]);
+
+  useEffect(() => {
+    if (!open || !prompt) return;
+
+    const deadline = Date.now() + PROMPT_ANSWER_MAX_SECONDS * 1000;
+    setSecondsLeft(PROMPT_ANSWER_MAX_SECONDS);
+
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setSecondsLeft(remaining);
+    };
+
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [open, prompt?.id]);
+
+  useEffect(() => {
+    if (!open) return;
+    const blockEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") e.preventDefault();
+    };
+    window.addEventListener("keydown", blockEscape);
+    return () => window.removeEventListener("keydown", blockEscape);
+  }, [open]);
 
   const wc = useMemo(() => countWords(answer), [answer]);
   const cost = prompt ? Number(prompt.submit_cost_tokens) || 0 : 0;
   const overLimit =
     prompt?.word_limit != null && wc > Number(prompt.word_limit);
   const expired = expiresAt ? new Date(expiresAt) < new Date() : false;
+  const timeExpired = secondsLeft <= 0;
   const canSubmit =
     !!prompt &&
     answer.trim().length > 0 &&
     !overLimit &&
     !expired &&
+    !timeExpired &&
     tokenBalance >= cost &&
     cost >= 1;
 
@@ -110,7 +146,6 @@ export function PromptSubmitModal({
           role="dialog"
           aria-modal="true"
           aria-labelledby="prompt-submit-title"
-          onClick={(e) => e.target === e.currentTarget && handleClose()}
         >
           <motion.div
             initial={{ opacity: 0, y: 24 }}
@@ -120,11 +155,24 @@ export function PromptSubmitModal({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="sticky top-0 flex items-start justify-between gap-4 p-5 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur z-10">
-              <div>
-                <h2 id="prompt-submit-title" className="text-lg font-bold text-white pr-8">
+              <div className="min-w-0 flex-1">
+                <h2 id="prompt-submit-title" className="text-lg font-bold text-white">
                   {prompt.headline}
                 </h2>
                 <div className="flex flex-wrap gap-3 mt-2 text-xs text-zinc-400">
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 font-semibold tabular-nums",
+                      timeExpired
+                        ? "text-red-400"
+                        : secondsLeft <= 300
+                          ? "text-amber-400"
+                          : "text-zinc-300"
+                    )}
+                  >
+                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    {timeExpired ? "Time expired" : `${formatCountdown(secondsLeft)} left`}
+                  </span>
                   <span className="inline-flex items-center gap-1 text-emerald-400/90">
                     <Banknote className="w-3.5 h-3.5" />
                     {formatKes(prompt.reward_kes)} KES reward
@@ -138,15 +186,6 @@ export function PromptSubmitModal({
                   ) : null}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={handleClose}
-                disabled={submitting}
-                className="p-2 rounded-lg text-zinc-500 hover:text-white hover:bg-white/10 shrink-0"
-                aria-label="Close"
-              >
-                <X className="w-5 h-5" />
-              </button>
             </div>
 
             <form onSubmit={handleSubmit} className="p-5 space-y-4">
@@ -163,7 +202,8 @@ export function PromptSubmitModal({
                   onChange={(e) => setAnswer(e.target.value)}
                   rows={8}
                   placeholder="Type your response…"
-                  className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-4 py-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 resize-y min-h-[160px]"
+                  disabled={timeExpired || submitting}
+                  className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-4 py-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 resize-y min-h-[160px] disabled:opacity-60"
                 />
                 <div className="flex flex-wrap items-center justify-between gap-2 mt-2 text-xs">
                   <span
@@ -179,6 +219,13 @@ export function PromptSubmitModal({
                   </span>
                 </div>
               </div>
+
+              {timeExpired ? (
+                <p className="text-sm text-red-400">
+                  The 30-minute time limit has passed. Cancel to close — you can open this prompt again
+                  to start a new attempt.
+                </p>
+              ) : null}
 
               {expired ? (
                 <p className="text-sm text-amber-500">

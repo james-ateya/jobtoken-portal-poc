@@ -59,7 +59,12 @@ export function LoginPage() {
       if (data.requiresOtp) {
         setLoading(false);
         navigate("/verify-otp", {
-          state: { email: data.email || email.trim().toLowerCase(), purpose: "login" as const },
+          state: {
+            email: data.email || email.trim().toLowerCase(),
+            purpose: "login" as const,
+            accountDeactivated: Boolean(data.accountDeactivated),
+            deactivatedMessage: data.message,
+          },
         });
         return;
       }

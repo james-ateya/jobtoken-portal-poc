@@ -46,6 +46,9 @@ interface WalletDashboardProps {
   expiresAt?: string | null;
   /** Seeker copy vs employer (posting / featured fees). */
   audience?: "seeker" | "employer";
+  /** When true, poll for token credit may trigger onAccountReactivated. */
+  accountPaused?: boolean;
+  onAccountReactivated?: () => void;
 }
 
 export function WalletDashboard({
@@ -54,6 +57,8 @@ export function WalletDashboard({
   userId,
   expiresAt,
   audience = "seeker",
+  accountPaused,
+  onAccountReactivated,
 }: WalletDashboardProps) {
   const [activeTab, setActiveTab] = useState<"wallet" | "history">("wallet");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -68,7 +73,9 @@ export function WalletDashboard({
   const [kesPerToken, setKesPerToken] = useState(20);
   const [minTopupKes, setMinTopupKes] = useState(100);
   const [maxTopupKes, setMaxTopupKes] = useState(150000);
+  const [tokenExpiryDays, setTokenExpiryDays] = useState(10);
   const [phone, setPhone] = useState("");
+  const [giftRecipientEmail, setGiftRecipientEmail] = useState("");
   const [stkLoading, setStkLoading] = useState(false);
   const [stkHint, setStkHint] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -95,6 +102,9 @@ export function WalletDashboard({
         }
         if (typeof d.minTopupKes === "number") setMinTopupKes(d.minTopupKes);
         if (typeof d.maxTopupKes === "number") setMaxTopupKes(d.maxTopupKes);
+        if (typeof d.tokenExpiryDays === "number" && d.tokenExpiryDays > 0) {
+          setTokenExpiryDays(d.tokenExpiryDays);
+        }
       })
       .catch(() => {});
   }, []);
@@ -137,6 +147,20 @@ export function WalletDashboard({
     }
   };
 
+  const maybeNotifyReactivation = async () => {
+    if (!accountPaused || !onAccountReactivated) return;
+    try {
+      const res = await apiFetch("/api/auth/session-profile");
+      if (!res.ok) return;
+      const profile = (await res.json()) as { is_active?: boolean; account_deactivated?: boolean };
+      if (profile.is_active !== false && !profile.account_deactivated) {
+        onAccountReactivated();
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
   const startWalletPoll = () => {
     stopPolling();
     startBalanceRef.current = balance;
@@ -149,6 +173,7 @@ export function WalletDashboard({
       if (data && data.token_balance !== startBalanceRef.current) {
         stopPolling();
         onBalanceRefresh?.();
+        await maybeNotifyReactivation();
         setStkHint(null);
       }
     }, 3000);
@@ -183,16 +208,22 @@ export function WalletDashboard({
         body: JSON.stringify({
           phoneNumber: phone,
           amountKes,
+          ...(giftRecipientEmail.trim()
+            ? { recipientEmail: giftRecipientEmail.trim() }
+            : {}),
         }),
       });
       if (!res.ok) throw new Error(await readWalletApiError(res));
       const json = (await res.json()) as {
         customerMessage?: string;
         checkoutRequestId?: string;
+        giftedToEmail?: string;
       };
       setStkHint(
         json.customerMessage ||
-          "Check your phone to approve M-Pesa. Your balance will update shortly."
+          (json.giftedToEmail
+            ? `Check your phone to approve M-Pesa. Tokens will be credited to ${json.giftedToEmail}.`
+            : "Check your phone to approve M-Pesa. Your balance will update shortly.")
       );
       startBalanceRef.current = balance;
       startWalletPoll();
@@ -215,6 +246,7 @@ export function WalletDashboard({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Simulate failed");
       onBalanceRefresh?.();
+      await maybeNotifyReactivation();
     } catch (e: any) {
       setStkHint(e.message);
     } finally {
@@ -287,7 +319,7 @@ export function WalletDashboard({
               )}
             >
               <Calendar className="w-3 h-3" />
-              {isExpired ? "Tokens Expired" : expiryDate ? `Expires ${expiryDate}` : "30-Day Validity"}
+              {isExpired ? "Tokens Expired" : expiryDate ? `Expires ${expiryDate}` : `${tokenExpiryDays}-Day Validity`}
             </div>
           )}
         </div>
@@ -300,6 +332,12 @@ export function WalletDashboard({
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 20 }}
             >
+              {accountPaused ? (
+                <p className="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 mb-4 leading-relaxed">
+                  Your account is paused. Complete a token top-up below (or receive a gift) to
+                  reactivate automatically.
+                </p>
+              ) : null}
               <div className="flex items-center gap-3 text-zinc-400 mb-4">
                 <Wallet className="w-5 h-5" />
                 <span className="text-sm font-medium uppercase tracking-wider">Current Balance</span>
@@ -415,6 +453,17 @@ export function WalletDashboard({
                 </div>
 
                 <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest block">
+                  Gift to subscriber (optional)
+                </label>
+                <input
+                  type="email"
+                  placeholder="Recipient email — leave blank to top up your wallet"
+                  value={giftRecipientEmail}
+                  onChange={(e) => setGiftRecipientEmail(e.target.value)}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50"
+                />
+
+                <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest block">
                   M-Pesa phone
                 </label>
                 <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
@@ -446,6 +495,7 @@ export function WalletDashboard({
                   <Plus className="w-5 h-5" />
                 )}
                 Pay Ksh {effectiveKes} via M-Pesa
+                {giftRecipientEmail.trim() ? " (gift)" : ""}
               </button>
 
               {allowSimulate && (

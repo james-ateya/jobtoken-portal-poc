@@ -157,3 +157,32 @@ export function requireSeeker(supabaseAdmin: SupabaseClient) {
     next();
   };
 }
+
+/** Seeker auth that allows deactivated accounts (wallet reactivation flows). */
+export function requireSeekerAllowInactive(supabaseAdmin: SupabaseClient) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const token = extractBearer(req);
+    if (!token) {
+      return res.status(401).json({
+        error: "Authorization: Bearer <access_token> required",
+      });
+    }
+    const {
+      data: { user },
+      error,
+    } = await supabaseAdmin.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ error: "Invalid or expired session" });
+    }
+    const { data: p } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+    if (p?.role !== "seeker") {
+      return res.status(403).json({ error: "Job seeker only" });
+    }
+    (req as AuthedRequest).authUserId = user.id;
+    next();
+  };
+}

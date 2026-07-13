@@ -45,7 +45,19 @@ interface UserApplication {
   };
 }
 
-export function DashboardPage({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
+export function DashboardPage({
+  user,
+  showToast,
+  accountPaused,
+  onAccountReactivated,
+  onRefreshAccountStatus,
+}: {
+  user: any;
+  showToast: (m: string, t?: "success" | "error") => void;
+  accountPaused?: boolean;
+  onAccountReactivated?: () => void;
+  onRefreshAccountStatus?: () => void;
+}) {
   const [balance, setBalance] = useState(0);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [expandedAppId, setExpandedAppId] = useState<string | null>(null);
@@ -386,6 +398,11 @@ export function DashboardPage({ user, showToast }: { user: any, showToast: (m: s
             onBalanceRefresh={fetchWallet}
             userId={user.id}
             expiresAt={expiresAt}
+            accountPaused={accountPaused}
+            onAccountReactivated={() => {
+              onRefreshAccountStatus?.();
+              onAccountReactivated?.();
+            }}
           />
         </div>
 

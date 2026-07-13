@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { normalizeEmail } from "./auth-otp.js";
 import { sendSeekerWelcomeEmail } from "./seeker-welcome-email.js";
+import { sendPromptGradingEmail } from "./prompt-grading-email.js";
 import {
   completePasswordReset,
   issuePasswordResetOtp,
@@ -27,6 +28,29 @@ import { createClient } from "@supabase/supabase-js";
 import { loadProjectEnv } from "./load-env.js";
 import { sendMail } from "./mail.js";
 import {
+  endOfPeriodMonth,
+  formatWithdrawalWindowDate,
+  getMinimumWithdrawalKes,
+  getNextWithdrawalWindowDate,
+  getWithdrawalScheduleDescription,
+  isWithdrawalWindowNow,
+} from "./withdrawal-window.js";
+import {
+  exchangeEarningsForTokens,
+} from "./earnings-token-exchange.js";
+import {
+  getEarningsBalanceKes,
+  loadEarningsBalancesMap,
+  loadWalletTransactionSummary,
+  sumPassedPromptRewardsKes,
+  sumPromptSubmissionCreditsKes,
+} from "./earnings-balances.js";
+import { buildProfileSearchOrFilter, normalizeAdminSearchQuery } from "./admin-search.js";
+import {
+  earningsTokenExchangeDisabledMessage,
+  isEarningsTokenExchangeEnabled,
+} from "./earnings-features.js";
+import {
   getKesPerToken,
   getTokenPacks,
   getTopupKesBounds,
@@ -37,6 +61,14 @@ import {
   resolveTokensForTopupKes,
   type StkCallbackParsed,
 } from "./mpesa.js";
+import { getWalletTokenExpiresAt, getWalletTokenExpiryDays, walletExpiryFields } from "./wallet-token-expiry.js";
+import { notifyTokenWalletCredited } from "./token-wallet-email.js";
+import { processTokenExpiryReminders } from "./token-expiry-reminders.js";
+import { sendAccountRegretEmail } from "./account-regret-email.js";
+import { blacklistEmail, getBlacklistForEmail, isEmailBlacklisted, isSchemaMissingError, loadBlacklistForEmails } from "./email-blacklist.js";
+import { fetchRowsInIdBatches } from "./query-batches.js";
+import { paginationMeta, parsePageParams } from "./pagination.js";
+import { tryReactivateAccountOnTokenCredit } from "./reactivate-on-token-credit.js";
 import { processStkCallback } from "./process-stk-callback.js";
 import {
   requireAdmin,
@@ -44,6 +76,7 @@ import {
   requireAuth,
   requireEmployer,
   requireSeeker,
+  requireSeekerAllowInactive,
   type AuthedRequest,
 } from "./auth.js";
 import {
@@ -114,6 +147,7 @@ const supabaseAdmin = createClient(
 const requireAuthMw = requireAuth(supabaseAdmin);
 const requireAdminMw = requireAdmin(supabaseAdmin);
 const requireSeekerMw = requireSeeker(supabaseAdmin);
+const requireSeekerAllowInactiveMw = requireSeekerAllowInactive(supabaseAdmin);
 const requireEmployerMw = requireEmployer(supabaseAdmin);
 const requireApprovedEmployerMw = requireApprovedEmployer(supabaseAdmin);
 
@@ -223,6 +257,15 @@ function walletHasActiveTokens(
   return walletTokensNotExpired(wallet.expires_at);
 }
 
+function authorizeCron(req: express.Request): boolean {
+  const secret = process.env.CRON_SECRET?.trim();
+  if (!secret) return false;
+  const auth = req.headers.authorization;
+  if (auth === `Bearer ${secret}`) return true;
+  const header = req.headers["x-cron-secret"];
+  return typeof header === "string" && header === secret;
+}
+
 async function adminPurgeUserDataBeforeDelete(userId: string, role: string): Promise<void> {
   if (role === "employer") {
     const { data: jobs } = await supabaseAdmin.from("jobs").select("id").eq("posted_by", userId);
@@ -286,23 +329,6 @@ function countWordsAnswer(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
-async function getEarningsBalanceKes(userId: string): Promise<number> {
-  const { data, error } = await supabaseAdmin
-    .from("earnings_ledger")
-    .select("amount_kes")
-    .eq("user_id", userId);
-  if (error) throw error;
-  return (data ?? []).reduce((acc, row) => acc + Number(row.amount_kes || 0), 0);
-}
-
-/** Withdrawal requests allowed from this calendar day of month onward (default 25). */
-function isWithdrawalWindowNow(): boolean {
-  const minDay = Math.max(
-    1,
-    Math.min(28, parseInt(process.env.EARNINGS_WITHDRAWAL_DAY_MIN || "25", 10) || 25)
-  );
-  return new Date().getDate() >= minDay;
-}
 
 // --- Auth / email ---
 app.post("/api/auth/resend-verification", async (req, res) => {
@@ -378,6 +404,13 @@ app.post("/api/auth/login", async (req, res) => {
   const emailNormalized = normalizeEmail(emailRaw);
 
   try {
+    const blocked = await isEmailBlacklisted(supabaseAdmin, emailNormalized);
+    if (blocked.blacklisted) {
+      return res.status(403).json({
+        error: "This email address has been permanently blocked from JobToken.",
+      });
+    }
+
     const authResult = await verifyPasswordAndGetUserId(emailNormalized, password);
     if ("error" in authResult) {
       return res.status(401).json({ error: authResult.error });
@@ -388,8 +421,26 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(403).json({ error: "Profile not found for this account" });
     }
     if (profile.is_active === false) {
-      return res.status(403).json({
-        error: "This account has been deactivated. Contact support if you believe this is a mistake.",
+      const stillBlacklisted = await isEmailBlacklisted(supabaseAdmin, emailNormalized);
+      if (stillBlacklisted.blacklisted) {
+        return res.status(403).json({
+          error: "This email address has been permanently blocked from JobToken.",
+        });
+      }
+      await issueSeekerOtp(supabaseAdmin, {
+        userId: authResult.userId,
+        email: emailNormalized,
+        purpose: "login",
+        role: profile.role,
+      });
+      return res.json({
+        success: true,
+        requiresOtp: true,
+        purpose: "login" as SeekerOtpPurpose,
+        email: emailNormalized,
+        accountDeactivated: true,
+        message:
+          "Your account is paused. Sign in to top up your wallet — tokens will reactivate your account automatically.",
       });
     }
 
@@ -437,6 +488,14 @@ async function handleRoleSignup(
   }
 
   try {
+    const blocked = await isEmailBlacklisted(supabaseAdmin, emailNormalized);
+    if (blocked.blacklisted) {
+      res.status(403).json({
+        error: "This email address cannot be used to register on JobToken.",
+      });
+      return;
+    }
+
     let userId: string;
     let resumed = false;
 
@@ -578,8 +637,14 @@ async function handleVerifyAuthOtp(req: express.Request, res: express.Response) 
     if (!profile) {
       return res.status(403).json({ error: "Profile not found for this account" });
     }
-    if (profile.is_active === false) {
-      return res.status(403).json({ error: "This account has been deactivated." });
+
+    if (profile.email) {
+      const blocked = await isEmailBlacklisted(supabaseAdmin, profile.email);
+      if (blocked.blacklisted) {
+        return res.status(403).json({
+          error: "This email address has been permanently blocked from JobToken.",
+        });
+      }
     }
 
     let pendingCouponBonus: { expiresAt: string; bonusTokens: number } | null = null;
@@ -643,6 +708,7 @@ async function handleVerifyAuthOtp(req: express.Request, res: express.Response) 
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       pendingCouponBonus,
+      accountDeactivated: profile.is_active === false,
     });
   } catch (error: any) {
     console.error("verify-otp:", error);
@@ -674,6 +740,15 @@ async function handleResendAuthOtp(req: express.Request, res: express.Response) 
     if (!fullProfile) {
       return res.json({ success: true, message: "If the account exists, a new code was sent." });
     }
+    if (fullProfile.is_active === false && purpose === "login") {
+      await issueSeekerOtp(supabaseAdmin, {
+        userId: profile.id,
+        email: emailNormalized,
+        purpose,
+        role: fullProfile.role,
+      });
+      return res.json({ success: true, message: "A new code was sent to your email." });
+    }
     if (fullProfile.is_active === false) {
       return res.json({ success: true, message: "If the account exists, a new code was sent." });
     }
@@ -699,7 +774,45 @@ app.get("/api/token-packs", (_req, res) => {
     kesPerToken: bounds.kesPerToken,
     minTopupKes: bounds.min,
     maxTopupKes: bounds.max,
+    tokenExpiryDays: getWalletTokenExpiryDays(),
   });
+});
+
+app.get("/api/auth/session-profile", requireAuthMw, async (req, res) => {
+  const userId = (req as AuthedRequest).authUserId;
+  try {
+    const { data: profile, error } = await supabaseAdmin
+      .from("profiles")
+      .select("role, is_active, full_name, email")
+      .eq("id", userId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!profile) return res.status(404).json({ error: "Profile not found" });
+    res.json({
+      role: profile.role,
+      is_active: profile.is_active !== false,
+      account_deactivated: profile.is_active === false,
+      full_name: profile.full_name,
+      email: profile.email,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Daily cron: email users whose tokens expire in WALLET_TOKEN_EXPIRY_REMINDER_DAYS (default 2). */
+app.get("/api/cron/token-expiry-reminders", async (req, res) => {
+  if (!authorizeCron(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const result = await processTokenExpiryReminders(supabaseAdmin);
+    res.json(result);
+  } catch (error: any) {
+    console.error("token-expiry-reminders cron:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 /** Public pricing hints for employer UI (featured listing cost from admin settings). */
@@ -745,14 +858,13 @@ app.post("/api/topup", requireAuthMw, async (req, res) => {
 
     await new Promise((r) => setTimeout(r, 800));
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30);
+    const expiresAt = getWalletTokenExpiresAt();
 
     const { error: updateError } = await supabaseAdmin
       .from("wallets")
       .update({
         token_balance: wallet.token_balance + pack.tokens,
-        expires_at: expiresAt.toISOString(),
+        ...walletExpiryFields(expiresAt),
       })
       .eq("id", wallet.id);
 
@@ -769,9 +881,29 @@ app.post("/api/topup", requireAuthMw, async (req, res) => {
       console.error("simulate topup coupon bonus:", couponErr);
     }
 
+    const finalBalance = wallet.token_balance + pack.tokens + couponBonusTokens;
+    try {
+      const reactivated = await tryReactivateAccountOnTokenCredit(
+        supabaseAdmin,
+        userId,
+        pack.tokens
+      );
+      await notifyTokenWalletCredited(supabaseAdmin, {
+        recipientUserId: userId,
+        tokensAdded: pack.tokens,
+        newBalance: finalBalance,
+        expiresAt: expiresAt.toISOString(),
+        amountKes: pack.kes,
+        purchaseSource: "simulate",
+        accountReactivated: reactivated,
+      });
+    } catch (mailErr) {
+      console.error("Simulate topup email:", mailErr);
+    }
+
     res.json({
       success: true,
-      newBalance: wallet.token_balance + pack.tokens + couponBonusTokens,
+      newBalance: finalBalance,
       couponBonusTokens: couponBonusTokens || undefined,
     });
   } catch (error: any) {
@@ -823,7 +955,7 @@ app.get("/api/coupon/pending-bonus", requireAuthMw, async (req, res) => {
 // --- M-Pesa STK ---
 app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
   const userId = (req as AuthedRequest).authUserId;
-  const { phoneNumber, packKes, amountKes } = req.body;
+  const { phoneNumber, packKes, amountKes, recipientEmail } = req.body;
   const { min, max, kesPerToken } = getTopupKesBounds();
 
   const raw =
@@ -860,11 +992,29 @@ app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
       return res.status(400).json({ error: "Enter a valid Kenya phone number" });
     }
 
+    let giftRecipientUserId: string | null = null;
+    const recipientEmailRaw = asNonEmptyString(recipientEmail);
+    if (recipientEmailRaw) {
+      const recipientEmailNormalized = normalizeEmail(recipientEmailRaw);
+      const recipientBlocked = await isEmailBlacklisted(supabaseAdmin, recipientEmailNormalized);
+      if (recipientBlocked.blacklisted) {
+        return res.status(403).json({ error: "That recipient email is blocked from JobToken" });
+      }
+      const recipientProfile = await getProfileByEmailNormalized(recipientEmailNormalized);
+      if (!recipientProfile) {
+        return res.status(404).json({ error: "Recipient not found for that email address" });
+      }
+      if (recipientProfile.id === userId) {
+        return res.status(400).json({ error: "Use a regular top-up to buy tokens for your own wallet" });
+      }
+      giftRecipientUserId = recipientProfile.id;
+    }
+
     const stk = await initiateStkPush({
       amountKes: kes,
       phone254,
       accountReference: `JT${wallet.id.slice(0, 8)}`,
-      transactionDesc: "JobToken wallet",
+      transactionDesc: giftRecipientUserId ? "JobToken gift" : "JobToken wallet",
     });
 
     const { error: insertError } = await supabaseAdmin.from("transactions").insert({
@@ -875,6 +1025,7 @@ app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
       amount_kes: kes,
       status: "pending",
       checkout_request_id: stk.checkoutRequestId,
+      gift_recipient_user_id: giftRecipientUserId,
     });
 
     if (insertError) {
@@ -888,6 +1039,7 @@ app.post("/api/mpesa/stk-push", requireAuthMw, async (req, res) => {
       customerMessage: stk.customerMessage,
       tokensOnSuccess: tokensPreview,
       kes,
+      giftedToEmail: recipientEmailRaw ?? undefined,
     });
   } catch (error: any) {
     console.error("STK error:", error?.message || error);
@@ -1068,6 +1220,11 @@ async function getProfileByEmailNormalized(emailNormalized: string) {
 async function handlePasswordResetRequest(
   emailNormalized: string
 ): Promise<{ sent: boolean; message: string }> {
+  const blocked = await isEmailBlacklisted(supabaseAdmin, emailNormalized);
+  if (blocked.blacklisted) {
+    return { sent: false, message: PASSWORD_RESET_GENERIC_MESSAGE };
+  }
+
   const account = await resolvePasswordResetAccount(supabaseAdmin, emailNormalized);
   if (!account || !account.isActive) {
     return { sent: false, message: PASSWORD_RESET_GENERIC_MESSAGE };
@@ -1813,23 +1970,155 @@ app.get("/api/admin/financial-overview", requireAdminMw, async (_req, res) => {
 
 app.get("/api/admin/users", requireAdminMw, async (req, res) => {
   const role = String(req.query.role || "").toLowerCase();
-  try {
-    let q = supabaseAdmin
-      .from("profiles")
-      .select(
-        "id, email, full_name, role, is_active, created_at, employer_approval_status, employer_approved_at"
-      )
-      .in("role", ["seeker", "employer", "admin"])
-      .order("email", { ascending: true });
+  const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
+    pageSize: 25,
+    maxPageSize: 100,
+  });
+  const profileFieldsBase =
+    "id, email, full_name, role, is_active, created_at, employer_approval_status, employer_approved_at";
 
-    if (role === "seeker" || role === "employer" || role === "admin") {
-      q = q.eq("role", role);
+  try {
+    const roleFilter =
+      role === "seeker" || role === "employer" || role === "admin" ? role : null;
+    const searchQuery = normalizeAdminSearchQuery(req.query.q ?? req.query.search);
+
+    let countQ = supabaseAdmin
+      .from("profiles")
+      .select("*", { count: "exact", head: true })
+      .in("role", ["seeker", "employer", "admin"]);
+    if (roleFilter) countQ = countQ.eq("role", roleFilter);
+    if (searchQuery) {
+      countQ = countQ.or(buildProfileSearchOrFilter(searchQuery));
     }
 
-    const { data, error } = await q;
+    const { count: total, error: countErr } = await countQ;
+    if (countErr) throw countErr;
+
+    let q = supabaseAdmin
+      .from("profiles")
+      .select(`${profileFieldsBase}, deactivation_reason`)
+      .in("role", ["seeker", "employer", "admin"])
+      .order("email", { ascending: true })
+      .range(from, to);
+
+    if (roleFilter) q = q.eq("role", roleFilter);
+    if (searchQuery) {
+      q = q.or(buildProfileSearchOrFilter(searchQuery));
+    }
+
+    let profileRows: Record<string, unknown>[] | null = null;
+    let { data, error } = await q;
+    if (error && isSchemaMissingError(error)) {
+      let fallbackQ = supabaseAdmin
+        .from("profiles")
+        .select(profileFieldsBase)
+        .in("role", ["seeker", "employer", "admin"])
+        .order("email", { ascending: true })
+        .range(from, to);
+      if (roleFilter) fallbackQ = fallbackQ.eq("role", roleFilter);
+      if (searchQuery) {
+        fallbackQ = fallbackQ.or(buildProfileSearchOrFilter(searchQuery));
+      }
+      const fallback = await fallbackQ;
+      profileRows = fallback.data;
+      error = fallback.error;
+    } else {
+      profileRows = data;
+    }
     if (error) throw error;
-    res.json({ users: data ?? [] });
+
+    const profiles = (profileRows ?? []).map((row) => {
+      const profile = row as Record<string, unknown> & {
+        id: string;
+        email?: string | null;
+        role?: string;
+        created_at?: string | null;
+        deactivation_reason?: string | null;
+      };
+      return {
+        ...profile,
+        deactivation_reason: profile.deactivation_reason ?? null,
+      };
+    });
+    const userIds = profiles.map((p) => p.id as string);
+
+    const walletByUser = new Map<string, number>();
+    const toppedUpUsers = new Set<string>();
+    const pageEmails = profiles
+      .map((p) => String(p.email || ""))
+      .filter((email) => email.length > 0);
+    const blacklistByEmail = await loadBlacklistForEmails(supabaseAdmin, pageEmails);
+
+    if (userIds.length > 0) {
+      const creditTypes = ["topup", "token_gift", "earnings_token_redemption", "coupon_bonus"];
+      const wallets = await fetchRowsInIdBatches<{ id: string; user_id: string; token_balance: unknown }>(
+        userIds,
+        (chunk) =>
+          supabaseAdmin
+            .from("wallets")
+            .select("id, user_id, token_balance")
+            .in("user_id", chunk)
+      );
+
+      const walletIdToUser = new Map<string, string>();
+      for (const wallet of wallets) {
+        walletByUser.set(wallet.user_id, Number(wallet.token_balance) || 0);
+        walletIdToUser.set(wallet.id, wallet.user_id);
+      }
+
+      const walletIds = [...walletIdToUser.keys()];
+      if (walletIds.length > 0) {
+        const credits = await fetchRowsInIdBatches<{ wallet_id: string }>(
+          walletIds,
+          (chunk) =>
+            supabaseAdmin
+              .from("transactions")
+              .select("wallet_id")
+              .in("wallet_id", chunk)
+              .eq("status", "completed")
+              .gt("tokens_added", 0)
+              .in("type", creditTypes)
+        );
+
+        for (const row of credits) {
+          const uid = walletIdToUser.get(row.wallet_id);
+          if (uid) toppedUpUsers.add(uid);
+        }
+      }
+    }
+
+    const now = Date.now();
+    const users = profiles.map((profile) => {
+      const createdAt = profile.created_at ? new Date(String(profile.created_at)).getTime() : now;
+      const daysSinceRegistration = Math.max(
+        0,
+        Math.floor((now - createdAt) / (1000 * 60 * 60 * 24))
+      );
+      const hasEverToppedUp = toppedUpUsers.has(profile.id as string);
+      const tokenBalance = walletByUser.get(profile.id as string) ?? 0;
+      const emailNorm = normalizeEmail(String(profile.email || ""));
+      const blacklist = blacklistByEmail.get(emailNorm);
+
+      return {
+        ...profile,
+        token_balance: tokenBalance,
+        days_since_registration: daysSinceRegistration,
+        has_ever_topped_up: hasEverToppedUp,
+        needs_topup_attention:
+          profile.role !== "admin" && daysSinceRegistration > 2 && !hasEverToppedUp,
+        is_blacklisted: Boolean(blacklist),
+        blacklist_reason: blacklist?.reason ?? null,
+        blacklisted_at: blacklist?.created_at ?? null,
+      };
+    });
+
+    res.json({
+      users,
+      search: searchQuery,
+      ...paginationMeta(total ?? 0, page, pageSize),
+    });
   } catch (error: any) {
+    console.error("GET /api/admin/users:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1855,6 +2144,11 @@ app.post("/api/admin/admins/create", requireAdminMw, async (req, res) => {
   }
 
   try {
+    const blocked = await isEmailBlacklisted(supabaseAdmin, emailNormalized);
+    if (blocked.blacklisted) {
+      return res.status(403).json({ error: "This email address is blacklisted and cannot be used." });
+    }
+
     const existing = await getProfileByEmailNormalized(emailNormalized);
     if (existing) {
       return res.status(400).json({ error: "An account with this email already exists" });
@@ -2113,6 +2407,23 @@ app.post("/api/admin/employers/:userId/reject", requireAdminMw, async (req, res)
       .eq("id", userId);
     if (upErr) throw upErr;
 
+    const { data: deactivatedProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email, full_name")
+      .eq("id", userId)
+      .maybeSingle();
+    if (deactivatedProfile?.email) {
+      try {
+        await sendAccountRegretEmail({
+          to: deactivatedProfile.email,
+          fullName: deactivatedProfile.full_name,
+          reason: "deactivated",
+        });
+      } catch (mailErr) {
+        console.error("employer reject regret email:", mailErr);
+      }
+    }
+
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -2146,25 +2457,10 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
     let employer_fees_tokens = 0;
 
     if (wallet?.id) {
-      const { data: aggTx } = await supabaseAdmin
-        .from("transactions")
-        .select("tokens_added, type, amount_kes, status")
-        .eq("wallet_id", wallet.id);
-
-      for (const t of aggTx ?? []) {
-        if (t.type === "topup" && t.status === "completed") {
-          total_topup_kes += Number(t.amount_kes ?? 0);
-        }
-        if (t.type === "application" && t.status === "completed") {
-          application_tokens_spent += Math.abs(Number(t.tokens_added) || 0);
-        }
-        if (
-          (t.type === "employer_fee" || t.type === "employer_feature_fee") &&
-          t.status === "completed"
-        ) {
-          employer_fees_tokens += Math.abs(Number(t.tokens_added) || 0);
-        }
-      }
+      const summaryRow = await loadWalletTransactionSummary(supabaseAdmin, wallet.id);
+      total_topup_kes = summaryRow.total_topup_kes;
+      application_tokens_spent = summaryRow.application_tokens_spent;
+      employer_fees_tokens = summaryRow.employer_fees_tokens;
 
       const { data: txs } = await supabaseAdmin
         .from("transactions")
@@ -2201,10 +2497,19 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
     const can_delete =
       profile.role === "admin" ? true : profile.role === "employer" ? !tokens_active : !tokens_active;
 
+    const blacklist = await getBlacklistForEmail(supabaseAdmin, profile.email);
+
     res.json({
       profile,
       wallet: wallet ?? null,
       transactions,
+      blacklist: blacklist
+        ? {
+            email: blacklist.email,
+            reason: blacklist.reason,
+            created_at: blacklist.created_at,
+          }
+        : null,
       summary: {
         total_topup_kes,
         application_tokens_spent,
@@ -2227,6 +2532,9 @@ app.post("/api/admin/users/set-active", requireAdminMw, async (req, res) => {
   const body = parseJsonBody(req);
   const userId = asNonEmptyString(body.userId);
   const isActive = body.isActive === true || body.isActive === false ? body.isActive : null;
+  const reasonRaw = body.reason ?? body.deactivationReason ?? body.deactivation_reason;
+  const reason =
+    typeof reasonRaw === "string" ? reasonRaw.trim() || null : null;
 
   if (!userId || typeof isActive !== "boolean") {
     return res.status(400).json({ error: "userId and boolean isActive required" });
@@ -2235,7 +2543,7 @@ app.post("/api/admin/users/set-active", requireAdminMw, async (req, res) => {
   try {
     const { data: profile, error: pErr } = await supabaseAdmin
       .from("profiles")
-      .select("role")
+      .select("role, email, full_name")
       .eq("id", userId)
       .single();
 
@@ -2246,15 +2554,130 @@ app.post("/api/admin/users/set-active", requireAdminMw, async (req, res) => {
       return res.status(403).json({ error: "Cannot change admin account status here" });
     }
 
+    if (isActive && profile.email) {
+      const blocked = await isEmailBlacklisted(supabaseAdmin, profile.email);
+      if (blocked.blacklisted) {
+        return res.status(403).json({
+          error: "This email is blacklisted. Remove the blacklist entry before reactivating.",
+        });
+      }
+    }
+
+    if (!isActive && !reason) {
+      return res.status(400).json({ error: "A deactivation reason is required" });
+    }
+
     const { error: uErr } = await supabaseAdmin
       .from("profiles")
-      .update({ is_active: isActive })
+      .update({
+        is_active: isActive,
+        deactivation_reason: isActive ? null : reason,
+      })
       .eq("id", userId);
 
-    if (uErr) throw uErr;
+    if (uErr && isSchemaMissingError(uErr)) {
+      const { error: fallbackErr } = await supabaseAdmin
+        .from("profiles")
+        .update({ is_active: isActive })
+        .eq("id", userId);
+      if (fallbackErr) throw fallbackErr;
+    } else if (uErr) {
+      throw uErr;
+    }
+
+    if (!isActive && profile.email) {
+      try {
+        await sendAccountRegretEmail({
+          to: profile.email,
+          fullName: profile.full_name,
+          reason: "deactivated",
+          adminNote: reason,
+        });
+      } catch (mailErr) {
+        console.error("deactivate regret email:", mailErr);
+      }
+    }
+
     res.json({ success: true, is_active: isActive });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/users/blacklist", requireAdminMw, async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = asNonEmptyString(body.userId);
+  const reasonRaw = body.reason ?? body.blacklistReason ?? body.blacklist_reason;
+  const reason =
+    typeof reasonRaw === "string" ? reasonRaw.trim() || null : null;
+  const adminUserId = (req as AuthedRequest).authUserId;
+
+  if (!userId) {
+    return res.status(400).json({ error: "userId required" });
+  }
+  if (!reason) {
+    return res.status(400).json({ error: "A blacklist reason is required" });
+  }
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role, email, full_name")
+      .eq("id", userId)
+      .single();
+
+    if (pErr || !profile) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (profile.role === "admin") {
+      return res.status(403).json({ error: "Cannot blacklist administrator accounts" });
+    }
+    if (!profile.email) {
+      return res.status(400).json({ error: "User has no email address to blacklist" });
+    }
+
+    const existing = await isEmailBlacklisted(supabaseAdmin, profile.email);
+    if (existing.blacklisted) {
+      return res.status(409).json({ error: "This email is already blacklisted" });
+    }
+
+    await blacklistEmail({
+      supabaseAdmin,
+      email: profile.email,
+      reason,
+      blacklistedByUserId: adminUserId,
+      sourceUserId: userId,
+    });
+
+    const { error: upErr } = await supabaseAdmin
+      .from("profiles")
+      .update({ is_active: false, deactivation_reason: null })
+      .eq("id", userId);
+    if (upErr && isSchemaMissingError(upErr)) {
+      const { error: fallbackErr } = await supabaseAdmin
+        .from("profiles")
+        .update({ is_active: false })
+        .eq("id", userId);
+      if (fallbackErr) throw fallbackErr;
+    } else if (upErr) {
+      throw upErr;
+    }
+
+    try {
+      await sendAccountRegretEmail({
+        to: profile.email,
+        fullName: profile.full_name,
+        reason: "blacklisted",
+        adminNote: reason,
+      });
+    } catch (mailErr) {
+      console.error("blacklist regret email:", mailErr);
+    }
+
+    res.json({ success: true, email: normalizeEmail(profile.email) });
+  } catch (error: any) {
+    console.error("admin blacklist user:", error);
+    res.status(500).json({ error: error.message || "Blacklist failed" });
   }
 });
 
@@ -2269,7 +2692,7 @@ app.post("/api/admin/users/delete", requireAdminMw, async (req, res) => {
   try {
     const { data: profile, error: pErr } = await supabaseAdmin
       .from("profiles")
-      .select("role")
+      .select("role, email, full_name")
       .eq("id", userId)
       .single();
 
@@ -2293,6 +2716,18 @@ app.post("/api/admin/users/delete", requireAdminMw, async (req, res) => {
         tokens_active: true,
         can_delete: false,
       });
+    }
+
+    if (profile.email) {
+      try {
+        await sendAccountRegretEmail({
+          to: profile.email,
+          fullName: profile.full_name,
+          reason: "deleted",
+        });
+      } catch (mailErr) {
+        console.error("delete regret email:", mailErr);
+      }
     }
 
     await adminPurgeUserDataBeforeDelete(userId, profile.role);
@@ -2789,8 +3224,31 @@ app.get("/api/earnings/summary", requireSeekerMw, async (req, res) => {
   const userId = (req as AuthedRequest).authUserId;
 
   try {
-    const balance = await getEarningsBalanceKes(userId);
-    res.json({ balance_kes: balance });
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
+    const nextWindow = getNextWithdrawalWindowDate();
+    res.json({
+      balance_kes: balance,
+      withdrawal_window_open: isWithdrawalWindowNow(),
+      next_withdrawal_window: formatWithdrawalWindowDate(nextWindow),
+      withdrawal_schedule: getWithdrawalScheduleDescription(),
+      minimum_withdrawal_kes: getMinimumWithdrawalKes(),
+      can_request_withdrawal:
+        isWithdrawalWindowNow() && balance >= getMinimumWithdrawalKes(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/earnings/withdrawal-window", requireSeekerMw, async (_req, res) => {
+  try {
+    const nextWindow = getNextWithdrawalWindowDate();
+    res.json({
+      open: isWithdrawalWindowNow(),
+      next_window: formatWithdrawalWindowDate(nextWindow),
+      schedule: getWithdrawalScheduleDescription(),
+      minimum_withdrawal_kes: getMinimumWithdrawalKes(),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -2816,6 +3274,124 @@ app.get("/api/earnings/ledger", requireSeekerMw, async (req, res) => {
   }
 });
 
+app.get("/api/earnings/exchange-info", requireSeekerMw, async (_req, res) => {
+  try {
+    const kesPerToken = getKesPerToken();
+    const enabled = isEarningsTokenExchangeEnabled();
+    res.json({
+      kes_per_token: kesPerToken,
+      minimum_kes: kesPerToken,
+      redeem_enabled: enabled,
+      gift_enabled: enabled,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/earnings/redeem-for-tokens", requireSeekerAllowInactiveMw, async (req, res) => {
+  if (!isEarningsTokenExchangeEnabled()) {
+    return res.status(403).json({ error: earningsTokenExchangeDisabledMessage() });
+  }
+
+  const userId = (req as AuthedRequest).authUserId;
+  const body = parseJsonBody(req);
+  const amountRaw = body.amountKes ?? body.amount_kes;
+  const amount =
+    typeof amountRaw === "number" ? amountRaw : parseFloat(String(amountRaw ?? ""));
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Positive amountKes required" });
+  }
+
+  try {
+    const result = await exchangeEarningsForTokens({
+      supabaseAdmin,
+      payerUserId: userId,
+      amountKes: amount,
+      recipientUserId: userId,
+    });
+
+    res.json({
+      success: true,
+      amount_kes_debited: result.amountKesDebited,
+      tokens_credited: result.tokensCredited,
+      new_earnings_balance_kes: result.newEarningsBalanceKes,
+      new_token_balance: result.newTokenBalance,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/earnings/gift-tokens", requireSeekerMw, async (req, res) => {
+  if (!isEarningsTokenExchangeEnabled()) {
+    return res.status(403).json({ error: earningsTokenExchangeDisabledMessage() });
+  }
+
+  const userId = (req as AuthedRequest).authUserId;
+  const body = parseJsonBody(req);
+  const amountRaw = body.amountKes ?? body.amount_kes;
+  const recipientEmailRaw = asNonEmptyString(body.recipientEmail ?? body.recipient_email);
+  const amount =
+    typeof amountRaw === "number" ? amountRaw : parseFloat(String(amountRaw ?? ""));
+
+  if (!recipientEmailRaw) {
+    return res.status(400).json({ error: "recipientEmail is required" });
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Positive amountKes required" });
+  }
+
+  const recipientEmailNormalized = normalizeEmail(recipientEmailRaw);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmailNormalized)) {
+    return res.status(400).json({ error: "Invalid recipient email address" });
+  }
+
+  try {
+    const recipientBlocked = await isEmailBlacklisted(supabaseAdmin, recipientEmailNormalized);
+    if (recipientBlocked.blacklisted) {
+      return res.status(403).json({ error: "That recipient email is blocked from JobToken" });
+    }
+
+    const recipientProfile = await getProfileByEmailNormalized(recipientEmailNormalized);
+    if (!recipientProfile) {
+      return res.status(404).json({ error: "Recipient not found for that email address" });
+    }
+    if (recipientProfile.id === userId) {
+      return res.status(400).json({
+        error: "Use redeem-for-tokens to convert earnings into your own wallet tokens",
+      });
+    }
+
+    const { data: payerProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email")
+      .eq("id", userId)
+      .maybeSingle();
+
+    const result = await exchangeEarningsForTokens({
+      supabaseAdmin,
+      payerUserId: userId,
+      amountKes: amount,
+      recipientUserId: recipientProfile.id,
+      recipientEmail: recipientProfile.email,
+      giftedByEmail: payerProfile?.email ?? null,
+    });
+
+    res.json({
+      success: true,
+      amount_kes_debited: result.amountKesDebited,
+      tokens_credited: result.tokensCredited,
+      recipient_email: result.recipientEmail,
+      new_earnings_balance_kes: result.newEarningsBalanceKes,
+      recipient_new_token_balance: result.newTokenBalance,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) => {
   const body = parseJsonBody(req);
   const userId = (req as AuthedRequest).authUserId;
@@ -2827,14 +3403,26 @@ app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) =
   }
 
   if (!isWithdrawalWindowNow()) {
+    const nextWindow = formatWithdrawalWindowDate(getNextWithdrawalWindowDate());
     return res.status(400).json({
-      error:
-        "Withdrawal requests are only open from the configured day of the month until month end (see EARNINGS_WITHDRAWAL_DAY_MIN).",
+      error: `Withdrawal requests open only on the first Tuesday of each month (from August 2026). Next window: ${nextWindow}.`,
+    });
+  }
+
+  const minimumWithdrawalKes = getMinimumWithdrawalKes();
+  if (amount < minimumWithdrawalKes) {
+    return res.status(400).json({
+      error: `Minimum withdrawal is Ksh ${minimumWithdrawalKes.toLocaleString("en-KE")}.`,
     });
   }
 
   try {
-    const balance = await getEarningsBalanceKes(userId);
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
+    if (balance < minimumWithdrawalKes) {
+      return res.status(400).json({
+        error: `You need at least Ksh ${minimumWithdrawalKes.toLocaleString("en-KE")} in earnings to request a withdrawal.`,
+      });
+    }
     if (amount > balance) {
       return res.status(400).json({
         error: `Requested amount exceeds available balance (${balance.toFixed(2)} KES)`,
@@ -2877,6 +3465,9 @@ app.post("/api/admin/prompt-submissions/:submissionId/grade", requireAdminMw, as
   const body = parseJsonBody(req);
   const adminUserId = (req as AuthedRequest).authUserId;
   const grade = asNonEmptyString(body.grade);
+  const gradingNoteRaw = body.gradingNote ?? body.grading_note;
+  const gradingNote =
+    typeof gradingNoteRaw === "string" ? gradingNoteRaw.trim() || null : null;
 
   if (grade !== "pass" && grade !== "fail") {
     return res.status(400).json({ error: "grade (pass|fail) required" });
@@ -2887,6 +3478,7 @@ app.post("/api/admin/prompt-submissions/:submissionId/grade", requireAdminMw, as
       p_submission_id: submissionId,
       p_grade: grade,
       p_graded_by: adminUserId,
+      p_grading_note: gradingNote,
     });
 
     if (rpcErr) throw rpcErr;
@@ -2895,23 +3487,78 @@ app.post("/api/admin/prompt-submissions/:submissionId/grade", requireAdminMw, as
       ok?: boolean;
       error?: string;
       duplicate_reward?: boolean;
+      grade_changed?: boolean;
+      previous_grade?: string;
+      new_grade?: string;
+      earnings_adjustment_kes?: number;
     };
 
     if (!row?.ok) {
       if (row?.error === "not_found") {
         return res.status(404).json({ error: "Submission not found" });
       }
-      if (row?.error === "already_graded") {
-        return res.status(400).json({ error: "Submission already graded" });
-      }
       return res.status(400).json({ error: row?.error || "Cannot grade submission" });
     }
 
-    if (row.duplicate_reward) {
-      return res.json({ success: true, duplicateReward: true });
+    let emailSent = false;
+    try {
+      const { data: submission, error: subErr } = await supabaseAdmin
+        .from("prompt_submissions")
+        .select("user_id, prompt_id")
+        .eq("id", submissionId)
+        .maybeSingle();
+      if (subErr) throw subErr;
+      if (submission) {
+        const [{ data: profile }, { data: prompt }] = await Promise.all([
+          supabaseAdmin
+            .from("profiles")
+            .select("email, full_name")
+            .eq("id", submission.user_id)
+            .maybeSingle(),
+          supabaseAdmin
+            .from("prompts")
+            .select("headline, reward_kes, series_id")
+            .eq("id", submission.prompt_id)
+            .maybeSingle(),
+        ]);
+
+        let seriesTitle: string | null = null;
+        if (prompt?.series_id) {
+          const { data: series } = await supabaseAdmin
+            .from("prompt_series")
+            .select("title")
+            .eq("id", prompt.series_id)
+            .maybeSingle();
+          seriesTitle = series?.title ?? null;
+        }
+
+        if (profile?.email) {
+          await sendPromptGradingEmail({
+            to: profile.email,
+            fullName: profile.full_name,
+            grade,
+            promptHeadline: prompt?.headline ?? "Prompt task",
+            seriesTitle,
+            rewardKes: Number(prompt?.reward_kes || 0),
+            earningsAdjustmentKes: Number(row.earnings_adjustment_kes || 0),
+            gradingNote,
+          });
+          emailSent = true;
+        }
+      }
+    } catch (mailErr) {
+      console.error("Prompt grading email:", mailErr);
     }
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      duplicateReward: Boolean(row.duplicate_reward),
+      gradeChanged: row.grade_changed !== false,
+      previousGrade: row.previous_grade ?? null,
+      newGrade: row.new_grade ?? grade,
+      earningsAdjustmentKes: Number(row.earnings_adjustment_kes || 0),
+      emailSent,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -3069,6 +3716,326 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
   }
 });
 
+app.get("/api/admin/payout-planning-report", requireAdminMw, async (req, res) => {
+  const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
+    pageSize: 20,
+    maxPageSize: 100,
+  });
+
+  try {
+    const balanceByUser = await loadEarningsBalancesMap(supabaseAdmin);
+
+    const { data: openReqs, error: reqErr } = await supabaseAdmin
+      .from("withdrawal_requests")
+      .select(
+        "id, user_id, amount_kes_requested, amount_paid_kes, period_month, status, created_at, profiles:user_id (email, full_name)"
+      )
+      .in("status", ["pending", "paid_partial"])
+      .order("created_at", { ascending: false });
+    if (reqErr) throw reqErr;
+
+    const openReqByUser = new Map<string, (typeof openReqs)[number]>();
+    for (const request of openReqs ?? []) {
+      if (!openReqByUser.has(request.user_id)) {
+        openReqByUser.set(request.user_id, request);
+      }
+    }
+
+    const userIds = new Set<string>([
+      ...balanceByUser.keys(),
+      ...openReqByUser.keys(),
+    ]);
+
+    const profileById = new Map<string, { email?: string; full_name?: string | null; role?: string }>();
+    if (userIds.size > 0) {
+      const profiles = await fetchRowsInIdBatches<{ id: string; email?: string; full_name?: string | null; role?: string }>(
+        [...userIds],
+        (chunk) =>
+          supabaseAdmin.from("profiles").select("id, email, full_name, role").in("id", chunk)
+      );
+      for (const profile of profiles) {
+        profileById.set(profile.id, profile);
+      }
+    }
+
+    const allUsers = [...userIds]
+      .map((userId) => {
+        const balance = Math.round((balanceByUser.get(userId) ?? 0) * 100) / 100;
+        const request = openReqByUser.get(userId);
+        const profile = profileById.get(userId);
+        const requested = Number(request?.amount_kes_requested ?? 0);
+        const paid = Number(request?.amount_paid_kes ?? 0);
+        const remaining = Math.max(0, requested - paid);
+        const planningStatus = request ? "requested" : "awaiting_request";
+        const expectedPayKes = request ? remaining : balance;
+
+        const requestProfile = Array.isArray(request?.profiles)
+          ? request.profiles[0]
+          : request?.profiles;
+
+        return {
+          user_id: userId,
+          email: profile?.email ?? requestProfile?.email ?? null,
+          full_name: profile?.full_name ?? requestProfile?.full_name ?? null,
+          role: profile?.role ?? null,
+          earnings_balance_kes: balance,
+          planning_status: planningStatus,
+          expected_pay_kes: Math.round(expectedPayKes * 100) / 100,
+          pay_by_date: request ? endOfPeriodMonth(String(request.period_month)) : null,
+          next_request_window:
+            planningStatus === "awaiting_request" && balance > 0
+              ? formatWithdrawalWindowDate(getNextWithdrawalWindowDate())
+              : null,
+          withdrawal_request: request
+            ? {
+                id: request.id,
+                amount_requested: requested,
+                amount_paid: paid,
+                amount_remaining: remaining,
+                period_month: request.period_month,
+                status: request.status,
+                created_at: request.created_at,
+              }
+            : null,
+        };
+      })
+      .filter((row) => row.earnings_balance_kes > 0 || row.withdrawal_request)
+      .sort((a, b) => {
+        if (a.pay_by_date && b.pay_by_date) {
+          const byDate = a.pay_by_date.localeCompare(b.pay_by_date);
+          if (byDate !== 0) return byDate;
+        } else if (a.pay_by_date) {
+          return -1;
+        } else if (b.pay_by_date) {
+          return 1;
+        }
+        return b.expected_pay_kes - a.expected_pay_kes;
+      });
+
+    const committedPayKes = allUsers
+      .filter((row) => row.planning_status === "requested")
+      .reduce((sum, row) => sum + row.expected_pay_kes, 0);
+    const potentialPayKes = allUsers
+      .filter((row) => row.planning_status === "awaiting_request")
+      .reduce((sum, row) => sum + row.expected_pay_kes, 0);
+
+    const total = allUsers.length;
+    const users = allUsers.slice(from, to + 1);
+
+    res.json({
+      schedule: getWithdrawalScheduleDescription(),
+      next_withdrawal_window: formatWithdrawalWindowDate(getNextWithdrawalWindowDate()),
+      withdrawal_window_open: isWithdrawalWindowNow(),
+      summary: {
+        users_count: total,
+        open_requests_count: allUsers.filter((row) => row.planning_status === "requested").length,
+        total_earnings_balance_kes: Math.round(
+          allUsers.reduce((sum, row) => sum + row.earnings_balance_kes, 0) * 100
+        ) / 100,
+        committed_pay_kes: Math.round(committedPayKes * 100) / 100,
+        potential_pay_kes: Math.round(potentialPayKes * 100) / 100,
+      },
+      users,
+      ...paginationMeta(total, page, pageSize),
+    });
+  } catch (error: any) {
+    console.error("GET /api/admin/payout-planning-report:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
+    pageSize: 15,
+    maxPageSize: 100,
+  });
+
+  try {
+    const { data: profile, error: profileErr } = await supabaseAdmin
+      .from("profiles")
+      .select("id, email, full_name, role")
+      .eq("id", userId)
+      .maybeSingle();
+    if (profileErr) throw profileErr;
+    if (!profile) return res.status(404).json({ error: "User not found" });
+
+    const earningsBalanceKes = await getEarningsBalanceKes(supabaseAdmin, userId);
+
+    const { count: submissionsTotal, error: totalErr } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+    if (totalErr) throw totalErr;
+
+    const countByStatus = async (status: string) => {
+      const { count, error } = await supabaseAdmin
+        .from("prompt_submissions")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("grade_status", status);
+      if (error) throw error;
+      return count ?? 0;
+    };
+
+    const [passedCount, failedCount, pendingCount, totalRewardOnPassedKes, totalCreditedKes] =
+      await Promise.all([
+        countByStatus("pass"),
+        countByStatus("fail"),
+        countByStatus("pending"),
+        sumPassedPromptRewardsKes(supabaseAdmin, userId),
+        sumPromptSubmissionCreditsKes(supabaseAdmin, userId),
+      ]);
+
+    const { data: submissions, error: subErr } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select(
+        "id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, graded_by, grading_note"
+      )
+      .eq("user_id", userId)
+      .order("submitted_at", { ascending: false })
+      .range(from, to);
+    if (subErr) throw subErr;
+
+    const submissionList = submissions ?? [];
+    const promptIds = [...new Set(submissionList.map((s) => s.prompt_id))];
+    const graderIds = [
+      ...new Set(
+        submissionList
+          .map((s) => s.graded_by)
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+      ),
+    ];
+
+    const promptMap = new Map<string, { headline: string; reward_kes: number; series_id: string }>();
+    const seriesMap = new Map<string, string>();
+    if (promptIds.length > 0) {
+      const prompts = await fetchRowsInIdBatches<{
+        id: string;
+        headline: string;
+        reward_kes: unknown;
+        series_id: string;
+      }>(promptIds, (chunk) =>
+        supabaseAdmin.from("prompts").select("id, headline, reward_kes, series_id").in("id", chunk)
+      );
+
+      const seriesIds = [...new Set(prompts.map((p) => p.series_id))];
+      if (seriesIds.length > 0) {
+        const seriesRows = await fetchRowsInIdBatches<{ id: string; title: string }>(
+          seriesIds,
+          (chunk) => supabaseAdmin.from("prompt_series").select("id, title").in("id", chunk)
+        );
+        for (const series of seriesRows) {
+          seriesMap.set(series.id, series.title);
+        }
+      }
+
+      for (const prompt of prompts) {
+        promptMap.set(prompt.id, {
+          headline: prompt.headline,
+          reward_kes: Number(prompt.reward_kes || 0),
+          series_id: prompt.series_id,
+        });
+      }
+    }
+
+    const graderMap = new Map<string, { email: string | null; full_name: string | null }>();
+    if (graderIds.length > 0) {
+      const graders = await fetchRowsInIdBatches<{
+        id: string;
+        email: string | null;
+        full_name: string | null;
+      }>(graderIds, (chunk) =>
+        supabaseAdmin.from("profiles").select("id, email, full_name").in("id", chunk)
+      );
+      for (const grader of graders) {
+        graderMap.set(grader.id, { email: grader.email, full_name: grader.full_name });
+      }
+    }
+
+    const submissionIds = submissionList.map((s) => s.id);
+    const creditBySubmission = new Map<
+      string,
+      { amount_kes: number; credited_at: string; ledger_id: string }
+    >();
+    if (submissionIds.length > 0) {
+      const ledgerRows = await fetchRowsInIdBatches<{
+        id: string;
+        amount_kes: unknown;
+        reference_id: string | null;
+        created_at: string;
+      }>(submissionIds, (chunk) =>
+        supabaseAdmin
+          .from("earnings_ledger")
+          .select("id, amount_kes, reference_id, created_at")
+          .eq("user_id", userId)
+          .eq("reference_type", "prompt_submission")
+          .in("reference_id", chunk)
+      );
+      for (const row of ledgerRows) {
+        if (!row.reference_id) continue;
+        const existing = creditBySubmission.get(row.reference_id);
+        const nextAmount = (existing?.amount_kes ?? 0) + Number(row.amount_kes || 0);
+        creditBySubmission.set(row.reference_id, {
+          amount_kes: Math.round(nextAmount * 100) / 100,
+          credited_at: row.created_at,
+          ledger_id: row.id,
+        });
+      }
+    }
+
+    const attempts = submissionList.map((submission) => {
+      const prompt = promptMap.get(submission.prompt_id);
+      const grader = submission.graded_by ? graderMap.get(submission.graded_by) : null;
+      const credit = creditBySubmission.get(submission.id);
+      const rewardKes = prompt?.reward_kes ?? 0;
+
+      return {
+        submission_id: submission.id,
+        series_title: prompt ? seriesMap.get(prompt.series_id) ?? null : null,
+        prompt_headline: prompt?.headline ?? null,
+        answer_text: submission.answer_text,
+        word_count: submission.word_count,
+        reward_kes: rewardKes,
+        tokens_charged: submission.tokens_charged,
+        grade_status: submission.grade_status,
+        submitted_at: submission.submitted_at,
+        graded_at: submission.graded_at,
+        graded_by: submission.graded_by,
+        grader_email: grader?.email ?? null,
+        grader_name: grader?.full_name ?? null,
+        grading_note: submission.grading_note ?? null,
+        credited_kes:
+          credit && credit.amount_kes !== 0 ? credit.amount_kes : null,
+        credited_at: credit?.credited_at ?? null,
+        reward_payable_on_pass: submission.grade_status === "pass" ? rewardKes : 0,
+      };
+    });
+
+    const summary = {
+      submissions_total: submissionsTotal ?? 0,
+      passed_count: passedCount,
+      failed_count: failedCount,
+      pending_count: pendingCount,
+      total_reward_on_passed_kes: Math.round(totalRewardOnPassedKes * 100) / 100,
+      total_credited_kes: totalCreditedKes,
+      earnings_balance_kes: Math.round(earningsBalanceKes * 100) / 100,
+    };
+
+    res.json({
+      user: profile,
+      summary,
+      attempts,
+      ...paginationMeta(submissionsTotal ?? 0, page, pageSize),
+    });
+  } catch (error: any) {
+    console.error("GET /api/admin/payout-planning/user/:userId:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/api/admin/export-earnings-ledger", requireAdminMw, async (_req, res) => {
   try {
     const { data: rows, error } = await supabaseAdmin
@@ -3192,7 +4159,7 @@ app.post("/api/admin/withdrawal-requests/:requestId/settle", requireAdminMw, asy
       });
     }
 
-    const balance = await getEarningsBalanceKes(userId);
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
     if (amountPaid > balance + 1e-9) {
       return res.status(400).json({
         error: `Amount exceeds user earnings balance (${balance.toFixed(2)} KES)`,

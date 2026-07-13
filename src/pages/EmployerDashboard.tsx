@@ -59,7 +59,19 @@ interface Applicant {
   profession_or_study?: string | null;
 }
 
-export function EmployerDashboard({ user, showToast }: { user: any, showToast: (m: string, t?: 'success' | 'error') => void }) {
+export function EmployerDashboard({
+  user,
+  showToast,
+  accountPaused,
+  onAccountReactivated,
+  onRefreshAccountStatus,
+}: {
+  user: any;
+  showToast: (m: string, t?: "success" | "error") => void;
+  accountPaused?: boolean;
+  onAccountReactivated?: () => void;
+  onRefreshAccountStatus?: () => void;
+}) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [jobFormOpen, setJobFormOpen] = useState(false);
@@ -512,6 +524,11 @@ export function EmployerDashboard({ user, showToast }: { user: any, showToast: (
               userId={user.id}
               expiresAt={employerExpiresAt}
               audience="employer"
+              accountPaused={accountPaused}
+              onAccountReactivated={() => {
+                onRefreshAccountStatus?.();
+                onAccountReactivated?.();
+              }}
             />
           </div>
         ) : null}

@@ -26,6 +26,8 @@ export function VerifyOtpPage() {
     purpose?: OtpPurpose;
     otpDeliveryFailed?: boolean;
     resumed?: boolean;
+    accountDeactivated?: boolean;
+    deactivatedMessage?: string;
   } | null;
   const [email] = useState(state?.email ?? "");
   const [purpose] = useState<OtpPurpose>(state?.purpose === "login" ? "login" : "signup");
@@ -118,6 +120,12 @@ export function VerifyOtpPage() {
                 : "Continuing your registration — enter the new code we sent, or resend if needed."}
             </p>
           )}
+          {state?.accountDeactivated && purpose === "login" ? (
+            <p className="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 mt-4 leading-relaxed">
+              {state.deactivatedMessage ||
+                "Your account is paused. After sign-in, top up your wallet to reactivate automatically."}
+            </p>
+          ) : null}
           <p className="text-xs text-zinc-600 mt-3 flex items-center justify-center gap-2">
             <Mail className="w-3.5 h-3.5" />
             {email}
