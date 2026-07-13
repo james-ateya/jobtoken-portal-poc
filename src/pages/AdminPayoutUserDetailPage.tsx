@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -12,7 +12,6 @@ import {
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
 import { AdminPagination } from "../components/AdminPagination";
-import { AdminVirtualTableRows } from "../components/AdminVirtualList";
 import {
   PromptSubmissionReviewModal,
   type PromptReviewSubmission,
@@ -129,7 +128,79 @@ export function AdminPayoutUserDetailPage({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [pageSize, setPageSize] = useState(15);
-  const tableScrollRef = useRef<HTMLDivElement>(null);
+
+  const renderAttemptCells = (attempt: AttemptRow) => {
+    const badge = gradeBadge(attempt.grade_status);
+    const BadgeIcon = badge.icon;
+    return (
+      <>
+        <td className="px-3 py-2.5 align-top">
+          <p
+            className="font-medium text-white truncate"
+            title={attempt.prompt_headline || undefined}
+          >
+            {attempt.prompt_headline || "—"}
+          </p>
+          <p
+            className="text-xs text-zinc-500 truncate"
+            title={attempt.series_title || undefined}
+          >
+            {attempt.series_title || "—"}
+          </p>
+          {attempt.grading_note ? (
+            <p className="text-xs text-zinc-400 mt-1 line-clamp-1" title={attempt.grading_note}>
+              Note: {attempt.grading_note}
+            </p>
+          ) : null}
+        </td>
+        <td className="px-3 py-2.5 align-top whitespace-nowrap text-zinc-400 text-xs">
+          {formatShortDate(attempt.submitted_at)}
+        </td>
+        <td className="px-3 py-2.5 align-top tabular-nums text-xs">
+          {formatKes(attempt.reward_kes)}
+        </td>
+        <td className="px-3 py-2.5 align-top">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border whitespace-nowrap",
+              badge.className
+            )}
+          >
+            <BadgeIcon className="w-3 h-3 shrink-0" />
+            {badge.label}
+          </span>
+        </td>
+        <td className="px-3 py-2.5 align-top text-xs">
+          {attempt.grader_name || attempt.grader_email ? (
+            <>
+              <p className="text-white truncate" title={attempt.grader_name || undefined}>
+                {attempt.grader_name || "—"}
+              </p>
+              <p className="text-zinc-500 truncate" title={attempt.grader_email || undefined}>
+                {attempt.grader_email}
+              </p>
+              <p className="text-zinc-500 mt-0.5">{formatShortDate(attempt.graded_at)}</p>
+            </>
+          ) : (
+            <span className="text-zinc-500">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2.5 align-top tabular-nums text-xs">
+          {attempt.credited_kes != null ? formatKes(attempt.credited_kes) : "—"}
+        </td>
+        <td className="px-3 py-2.5 align-top text-right">
+          <button
+            type="button"
+            onClick={() => setReviewAttempt(attempt)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-white/10 hover:bg-white/15 border border-white/10 whitespace-nowrap"
+          >
+            <Eye className="w-3.5 h-3.5 shrink-0" />
+            Review
+          </button>
+        </td>
+      </>
+    );
+  };
 
   const load = useCallback(async () => {
     if (!userId) return;
@@ -286,7 +357,7 @@ export function AdminPayoutUserDetailPage({
               </p>
             ) : (
               <div className="rounded-2xl border border-white/10 overflow-hidden">
-                <div ref={tableScrollRef} className="overflow-auto max-h-[560px]">
+                <div className="overflow-auto max-h-[560px]">
                   <table className="w-full text-sm table-fixed">
                     <colgroup>
                       <col className="w-[24%]" />
@@ -309,94 +380,22 @@ export function AdminPayoutUserDetailPage({
                       </tr>
                     </thead>
                     <tbody>
-                      <AdminVirtualTableRows<AttemptRow>
-                        items={report.attempts}
-                        colSpan={7}
-                        estimateRowHeight={88}
-                        scrollRef={tableScrollRef}
-                        getKey={(attempt) => attempt.submission_id}
-                        getRowClassName={() => "border-b border-white/5"}
-                        renderCells={(attempt) => {
-                          const badge = gradeBadge(attempt.grade_status);
-                          const BadgeIcon = badge.icon;
-                          return (
-                            <>
-                              <td className="px-3 py-2.5 align-top">
-                                <p
-                                  className="font-medium text-white truncate"
-                                  title={attempt.prompt_headline || undefined}
-                                >
-                                  {attempt.prompt_headline || "—"}
-                                </p>
-                                <p
-                                  className="text-xs text-zinc-500 truncate"
-                                  title={attempt.series_title || undefined}
-                                >
-                                  {attempt.series_title || "—"}
-                                </p>
-                                {attempt.grading_note ? (
-                                  <p
-                                    className="text-xs text-zinc-400 mt-1 line-clamp-1"
-                                    title={attempt.grading_note}
-                                  >
-                                    Note: {attempt.grading_note}
-                                  </p>
-                                ) : null}
-                              </td>
-                              <td className="px-3 py-2.5 align-top whitespace-nowrap text-zinc-400 text-xs">
-                                {formatShortDate(attempt.submitted_at)}
-                              </td>
-                              <td className="px-3 py-2.5 align-top tabular-nums text-xs">
-                                {formatKes(attempt.reward_kes)}
-                              </td>
-                              <td className="px-3 py-2.5 align-top">
-                                <span
-                                  className={cn(
-                                    "inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border whitespace-nowrap",
-                                    badge.className
-                                  )}
-                                >
-                                  <BadgeIcon className="w-3 h-3 shrink-0" />
-                                  {badge.label}
-                                </span>
-                              </td>
-                              <td className="px-3 py-2.5 align-top text-xs">
-                                {attempt.grader_name || attempt.grader_email ? (
-                                  <>
-                                    <p className="text-white truncate" title={attempt.grader_name || undefined}>
-                                      {attempt.grader_name || "—"}
-                                    </p>
-                                    <p
-                                      className="text-zinc-500 truncate"
-                                      title={attempt.grader_email || undefined}
-                                    >
-                                      {attempt.grader_email}
-                                    </p>
-                                    <p className="text-zinc-500 mt-0.5">
-                                      {formatShortDate(attempt.graded_at)}
-                                    </p>
-                                  </>
-                                ) : (
-                                  <span className="text-zinc-500">—</span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2.5 align-top tabular-nums text-xs">
-                                {attempt.credited_kes != null ? formatKes(attempt.credited_kes) : "—"}
-                              </td>
-                              <td className="px-3 py-2.5 align-top text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => setReviewAttempt(attempt)}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-white/10 hover:bg-white/15 border border-white/10 whitespace-nowrap"
-                                >
-                                  <Eye className="w-3.5 h-3.5 shrink-0" />
-                                  Review
-                                </button>
-                              </td>
-                            </>
-                          );
-                        }}
-                      />
+                      {report.attempts.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="px-3 py-10 text-center text-zinc-500">
+                            No attempts on this page.
+                          </td>
+                        </tr>
+                      ) : (
+                        report.attempts.map((attempt) => (
+                          <tr
+                            key={attempt.submission_id}
+                            className="border-b border-white/5"
+                          >
+                            {renderAttemptCells(attempt)}
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
