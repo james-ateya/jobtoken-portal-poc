@@ -26,6 +26,7 @@ import {
   UserCheck,
   Megaphone,
   PiggyBank,
+  Headset,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
@@ -447,6 +448,13 @@ export function AdminDashboard({ user, showToast }: { user: any, showToast: (m: 
           >
             <Activity className="w-4 h-4 text-emerald-400" />
             Platform Health
+          </Link>
+          <Link
+            to="/admin/support"
+            className="flex items-center gap-2 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm font-bold text-white hover:bg-white/10 transition-all"
+          >
+            <Headset className="w-4 h-4 text-emerald-400" />
+            Support Tickets
           </Link>
           <div className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />

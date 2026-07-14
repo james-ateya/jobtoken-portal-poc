@@ -36,6 +36,12 @@ export function SiteFooter() {
           >
             Terms of Use
           </Link>
+          <Link
+            to="/contact"
+            className="text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors"
+          >
+            Contact Support
+          </Link>
         </nav>
       </div>
     </footer>

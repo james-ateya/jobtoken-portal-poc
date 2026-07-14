@@ -32,8 +32,11 @@ import { SiteFooter } from "./components/SiteFooter";
 import { ThemeMenu } from "./components/ThemeMenu";
 import { PrivacyPolicyPage } from "./pages/PrivacyPolicyPage";
 import { TermsOfUsePage } from "./pages/TermsOfUsePage";
+import { ContactPage } from "./pages/ContactPage";
+import { TicketTrackPage } from "./pages/TicketTrackPage";
+import { AdminSupportPage } from "./pages/AdminSupportPage";
 import { motion, AnimatePresence } from "motion/react";
-import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine, PauseCircle } from "lucide-react";
+import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine, PauseCircle, Headset } from "lucide-react";
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -225,6 +228,13 @@ export default function App() {
                       </Link>
                     </>
                   )}
+                  <Link
+                    to="/contact"
+                    className="text-sm font-medium text-zinc-600 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-400 transition-colors flex items-center gap-2"
+                  >
+                    <Headset className="w-4 h-4" />
+                    Support
+                  </Link>
                   <div className="flex items-center gap-4">
                     <div className="hidden md:flex flex-col items-end">
                       <span className="text-sm font-medium text-zinc-800 dark:text-white">
@@ -244,6 +254,13 @@ export default function App() {
                 </div>
               ) : (
                 <div className="flex items-center gap-3">
+                  <Link
+                    to="/contact"
+                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium text-zinc-700 hover:bg-zinc-200/80 dark:text-zinc-300 dark:hover:bg-white/5 transition-colors"
+                  >
+                    <Headset className="w-4 h-4" />
+                    Support
+                  </Link>
                   <Link
                     to="/login"
                     className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium text-zinc-700 hover:bg-zinc-200/80 dark:text-zinc-300 dark:hover:bg-white/5 transition-colors"
@@ -295,6 +312,8 @@ export default function App() {
           <Route path="/verify-seeker" element={<VerifyOtpPage />} />
           <Route path="/privacy" element={<PrivacyPolicyPage />} />
           <Route path="/terms" element={<TermsOfUsePage />} />
+          <Route path="/contact" element={<ContactPage showToast={showToast} user={user} />} />
+          <Route path="/support/track" element={<TicketTrackPage />} />
           <Route
             path="/dashboard/profile"
             element={
@@ -671,6 +690,22 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminPromptReviewPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/support"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminSupportPage showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />

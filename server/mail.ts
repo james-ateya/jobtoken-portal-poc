@@ -4,6 +4,7 @@ export type SendMailParams = {
   to: string | string[];
   subject: string;
   html: string;
+  from?: { address: string; name: string };
 };
 
 function resolveProvider(): "smtp" | "zeptomail" {
@@ -25,7 +26,8 @@ function resolveProvider(): "smtp" | "zeptomail" {
 async function sendViaZeptomail(
   recipients: string[],
   subject: string,
-  html: string
+  html: string,
+  fromOverride?: { address: string; name: string }
 ): Promise<void> {
   const token = process.env.ZEPTOMAIL_TOKEN;
   if (!token) {
@@ -34,8 +36,8 @@ async function sendViaZeptomail(
     );
   }
 
-  const fromAddress = process.env.ZEPTOMAIL_FROM_ADDRESS || "admin@jobtoken.co.ke";
-  const fromName = process.env.ZEPTOMAIL_FROM_NAME || "JobToken";
+  const fromAddress = fromOverride?.address || process.env.ZEPTOMAIL_FROM_ADDRESS || "admin@jobtoken.co.ke";
+  const fromName = fromOverride?.name || process.env.ZEPTOMAIL_FROM_NAME || "JobToken";
 
   const body = {
     from: { address: fromAddress, name: fromName },
@@ -83,19 +85,20 @@ function createSmtpTransport() {
   });
 }
 
-export async function sendMail({ to, subject, html }: SendMailParams): Promise<void> {
+export async function sendMail({ to, subject, html, from: fromOverride }: SendMailParams): Promise<void> {
   const recipients = Array.isArray(to) ? to : [to];
   const provider = resolveProvider();
 
   if (provider === "zeptomail") {
-    await sendViaZeptomail(recipients, subject, html);
+    await sendViaZeptomail(recipients, subject, html, fromOverride);
     return;
   }
 
-  const from =
-    process.env.SMTP_FROM ||
-    process.env.EMAIL_FROM ||
-    "JobToken <noreply@localhost>";
+  const from = fromOverride
+    ? `${fromOverride.name} <${fromOverride.address}>`
+    : process.env.SMTP_FROM ||
+      process.env.EMAIL_FROM ||
+      "JobToken <noreply@localhost>";
 
   const transport = createSmtpTransport();
   await transport.sendMail({

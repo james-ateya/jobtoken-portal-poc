@@ -74,6 +74,7 @@ import { paginationMeta, parsePageParams } from "./pagination.js";
 import { tryReactivateAccountOnTokenCredit } from "./reactivate-on-token-credit.js";
 import { processStkCallback } from "./process-stk-callback.js";
 import {
+  extractBearer,
   requireAdmin,
   requireApprovedEmployer,
   requireAuth,
@@ -89,6 +90,7 @@ import {
   fulfillCouponBonus,
 } from "./coupon.js";
 import { sendCouponBonusEmail } from "./coupon-bonus-email.js";
+import { sendTicketConfirmationEmail, sendTicketReplyEmail } from "./support-ticket-email.js";
 
 const { loadedFiles } = loadProjectEnv();
 if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
@@ -109,7 +111,7 @@ if (process.env.VERCEL) {
       pathOnly !== "/" &&
       !pathOnly.startsWith("/api/") &&
       pathOnly !== "/api" &&
-      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin|prompts|earnings|health|monitoring)\b/.test(
+      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin|prompts|earnings|health|monitoring|support|cron)\b/.test(
         pathOnly
       );
     if (needsApi) {
@@ -4761,6 +4763,367 @@ app.post("/api/admin/coupons/:id/revoke", requireAdminMw, async (req, res) => {
     res.json({ coupon: data, message: "Coupon revoked" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Support Tickets — public routes
+// ---------------------------------------------------------------------------
+
+const SUPPORT_TICKET_CATEGORIES = [
+  "account_issue", "payment_billing", "token_wallet", "prompt_submissions",
+  "job_applications", "technical_bug", "feature_request", "other",
+] as const;
+
+app.post("/api/support/tickets", async (req, res) => {
+  try {
+    const { email, name, category, subject, description, company_website } = req.body;
+
+    if (company_website) {
+      return res.json({ success: true, ticket_number: "JT-00000000-0000" });
+    }
+
+    if (!email || !subject || !description) {
+      return res.status(400).json({ error: "Email, subject, and description are required." });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const trimmedEmail = String(email).toLowerCase().trim();
+    if (!emailRegex.test(trimmedEmail)) {
+      return res.status(400).json({ error: "Please provide a valid email address." });
+    }
+    const trimmedSubject = String(subject).trim();
+    if (trimmedSubject.length < 5 || trimmedSubject.length > 200) {
+      return res.status(400).json({ error: "Subject must be between 5 and 200 characters." });
+    }
+    const trimmedDesc = String(description).trim();
+    if (trimmedDesc.length < 20 || trimmedDesc.length > 5000) {
+      return res.status(400).json({ error: "Description must be between 20 and 5,000 characters." });
+    }
+    const cat = SUPPORT_TICKET_CATEGORIES.includes(category) ? category : "other";
+
+    const { count } = await supabaseAdmin
+      .from("support_tickets")
+      .select("id", { count: "exact", head: true })
+      .eq("email", trimmedEmail)
+      .gte("created_at", new Date(Date.now() - 86_400_000).toISOString());
+    if ((count ?? 0) >= 5) {
+      return res.status(429).json({ error: "You've reached the daily ticket limit. Please wait before submitting again." });
+    }
+
+    let userId: string | null = null;
+    const bearer = extractBearer(req);
+    if (bearer) {
+      const { data } = await supabaseAdmin.auth.getUser(bearer);
+      if (data?.user) userId = data.user.id;
+    }
+
+    const { data: ticket, error } = await supabaseAdmin
+      .from("support_tickets")
+      .insert({
+        email: trimmedEmail,
+        name: name?.trim() || null,
+        user_id: userId,
+        category: cat,
+        subject: trimmedSubject,
+        description: trimmedDesc,
+      })
+      .select("id, ticket_number, created_at")
+      .single();
+
+    if (error) {
+      console.error("Ticket creation failed:", error);
+      return res.status(500).json({ error: "Failed to create ticket. Please try again." });
+    }
+
+    sendTicketConfirmationEmail({
+      to: trimmedEmail,
+      name: name?.trim() || null,
+      ticketNumber: ticket.ticket_number,
+      subject: trimmedSubject,
+    }).catch((err) => console.error("Ticket confirmation email failed:", err));
+
+    return res.json({ success: true, ticket_number: ticket.ticket_number });
+  } catch (err: any) {
+    console.error("POST /api/support/tickets:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/support/tickets/lookup", async (req, res) => {
+  try {
+    const { ticket_number, email } = req.query;
+    if (!ticket_number || !email) {
+      return res.status(400).json({ error: "Ticket number and email are required." });
+    }
+
+    const { data: ticket } = await supabaseAdmin
+      .from("support_tickets")
+      .select("id, ticket_number, email, category, subject, description, status, priority, created_at, updated_at, resolved_at")
+      .eq("ticket_number", String(ticket_number).toUpperCase().trim())
+      .eq("email", String(email).toLowerCase().trim())
+      .single();
+
+    if (!ticket) {
+      return res.status(404).json({ error: "No ticket found. Please check your ticket number and email address." });
+    }
+
+    const { data: replies } = await supabaseAdmin
+      .from("support_ticket_replies")
+      .select("id, author_role, body, created_at")
+      .eq("ticket_id", ticket.id)
+      .eq("is_internal", false)
+      .order("created_at", { ascending: true });
+
+    return res.json({ ticket, replies: replies || [] });
+  } catch (err: any) {
+    console.error("GET /api/support/tickets/lookup:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/support/tickets/reply", async (req, res) => {
+  try {
+    const { ticket_number, email, body } = req.body;
+    if (!ticket_number || !email || !body?.trim()) {
+      return res.status(400).json({ error: "Ticket number, email, and reply body are required." });
+    }
+    const trimmedBody = String(body).trim();
+    if (trimmedBody.length > 5000) {
+      return res.status(400).json({ error: "Reply must be under 5,000 characters." });
+    }
+
+    const { data: ticket } = await supabaseAdmin
+      .from("support_tickets")
+      .select("id, status")
+      .eq("ticket_number", String(ticket_number).toUpperCase().trim())
+      .eq("email", String(email).toLowerCase().trim())
+      .single();
+
+    if (!ticket) {
+      return res.status(404).json({ error: "Ticket not found." });
+    }
+    if (ticket.status === "closed") {
+      return res.status(400).json({ error: "This ticket is closed. Please open a new ticket if you need further help." });
+    }
+
+    const { error } = await supabaseAdmin.from("support_ticket_replies").insert({
+      ticket_id: ticket.id,
+      author_id: null,
+      author_role: "user",
+      body: trimmedBody,
+      is_internal: false,
+    });
+    if (error) {
+      console.error("User reply insert failed:", error);
+      return res.status(500).json({ error: "Failed to submit reply." });
+    }
+
+    if (ticket.status === "resolved") {
+      await supabaseAdmin.from("support_tickets").update({ status: "open" }).eq("id", ticket.id);
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error("POST /api/support/tickets/reply:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Support Tickets — admin routes
+// ---------------------------------------------------------------------------
+
+app.get("/api/admin/support/stats", requireAdminMw, async (_req, res) => {
+  try {
+    const counts: Record<string, number> = { open: 0, in_progress: 0, resolved: 0, closed: 0 };
+    for (const status of Object.keys(counts)) {
+      const { count } = await supabaseAdmin
+        .from("support_tickets")
+        .select("id", { count: "exact", head: true })
+        .eq("status", status);
+      counts[status] = count ?? 0;
+    }
+    return res.json(counts);
+  } catch (err: any) {
+    console.error("GET /api/admin/support/stats:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/admin/support/tickets", requireAdminMw, async (req, res) => {
+  try {
+    const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>);
+    const { status, priority, category, search } = req.query;
+
+    let query = supabaseAdmin
+      .from("support_tickets")
+      .select("id, ticket_number, email, name, user_id, category, subject, status, priority, assigned_to, created_at, updated_at", { count: "exact" });
+
+    if (status && status !== "all") query = query.eq("status", String(status));
+    if (priority && priority !== "all") query = query.eq("priority", String(priority));
+    if (category && category !== "all") query = query.eq("category", String(category));
+    if (search) {
+      const s = String(search).trim();
+      query = query.or(`ticket_number.ilike.%${s}%,email.ilike.%${s}%,subject.ilike.%${s}%`);
+    }
+
+    const { data, count, error } = await query
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (error) throw error;
+    return res.json({ tickets: data || [], ...paginationMeta(count ?? 0, page, pageSize) });
+  } catch (err: any) {
+    console.error("GET /api/admin/support/tickets:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/admin/support/tickets/:id", requireAdminMw, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: ticket, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select("*")
+      .eq("id", id)
+      .single();
+    if (error || !ticket) {
+      return res.status(404).json({ error: "Ticket not found." });
+    }
+
+    const { data: replies } = await supabaseAdmin
+      .from("support_ticket_replies")
+      .select("id, author_id, author_role, body, is_internal, created_at")
+      .eq("ticket_id", id)
+      .order("created_at", { ascending: true });
+
+    const authorIds = (replies ?? []).map((r: any) => r.author_id).filter(Boolean);
+    let authorProfiles: Record<string, string> = {};
+    if (authorIds.length > 0) {
+      const { data: profiles } = await supabaseAdmin
+        .from("profiles")
+        .select("id, full_name")
+        .in("id", [...new Set(authorIds)]);
+      for (const p of profiles ?? []) {
+        authorProfiles[p.id] = p.full_name || "Admin";
+      }
+    }
+
+    const enrichedReplies = (replies ?? []).map((r: any) => ({
+      ...r,
+      author_name: r.author_id ? (authorProfiles[r.author_id] || "Support Team") : (r.author_role === "user" ? ticket.name || ticket.email : "System"),
+    }));
+
+    return res.json({ ticket, replies: enrichedReplies });
+  } catch (err: any) {
+    console.error("GET /api/admin/support/tickets/:id:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch("/api/admin/support/tickets/:id", requireAdminMw, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, priority, assigned_to } = req.body;
+    const update: Record<string, any> = {};
+    if (status) update.status = status;
+    if (priority) update.priority = priority;
+    if (assigned_to !== undefined) update.assigned_to = assigned_to || null;
+    if (status === "resolved") update.resolved_at = new Date().toISOString();
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: "No fields to update." });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("support_tickets")
+      .update(update)
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) throw error;
+    return res.json({ ticket: data });
+  } catch (err: any) {
+    console.error("PATCH /api/admin/support/tickets/:id:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/support/tickets/:id/replies", requireAdminMw, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { body, is_internal, new_status } = req.body;
+    if (!body?.trim()) {
+      return res.status(400).json({ error: "Reply body is required." });
+    }
+
+    const { error: replyErr } = await supabaseAdmin
+      .from("support_ticket_replies")
+      .insert({
+        ticket_id: id,
+        author_id: (req as AuthedRequest).authUserId,
+        author_role: "admin",
+        body: String(body).trim(),
+        is_internal: is_internal || false,
+      });
+    if (replyErr) {
+      console.error("Admin reply insert failed:", replyErr);
+      return res.status(500).json({ error: "Failed to post reply." });
+    }
+
+    if (new_status) {
+      const statusUpdate: Record<string, any> = { status: new_status };
+      if (new_status === "resolved") statusUpdate.resolved_at = new Date().toISOString();
+      await supabaseAdmin.from("support_tickets").update(statusUpdate).eq("id", id);
+    }
+
+    if (!is_internal) {
+      const { data: ticket } = await supabaseAdmin
+        .from("support_tickets")
+        .select("email, name, ticket_number, subject")
+        .eq("id", id)
+        .single();
+
+      if (ticket) {
+        sendTicketReplyEmail({
+          to: ticket.email,
+          name: ticket.name,
+          ticketNumber: ticket.ticket_number,
+          subject: ticket.subject,
+          replyBody: String(body).trim(),
+          newStatus: new_status || null,
+        }).catch((err) => console.error("Ticket reply email failed:", err));
+      }
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error("POST /api/admin/support/tickets/:id/replies:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Support Tickets — cron: auto-close stale resolved tickets
+// ---------------------------------------------------------------------------
+
+app.post("/api/cron/close-stale-tickets", async (req, res) => {
+  if (!authorizeCron(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const { data, error } = await supabaseAdmin
+      .from("support_tickets")
+      .update({ status: "closed" })
+      .eq("status", "resolved")
+      .lt("updated_at", cutoff)
+      .select("id");
+    if (error) throw error;
+    return res.json({ success: true, closed: data?.length ?? 0 });
+  } catch (err: any) {
+    console.error("cron close-stale-tickets:", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
