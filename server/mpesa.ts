@@ -20,8 +20,8 @@ export function getTokenPacks(): TokenPack[] {
   }
   return [
     { kes: 100, tokens: 5 },
-    { kes: 200, tokens: 12 },
-    { kes: 500, tokens: 35 },
+    { kes: 500, tokens: 25 },
+    { kes: 1000, tokens: 50 },
   ];
 }
 
@@ -53,12 +53,9 @@ export function getTopupKesBounds(): { min: number; max: number; kesPerToken: nu
   return { min, max, kesPerToken };
 }
 
-/** Tokens credited for this KES amount: pack bonus if exact match, else linear custom rate. */
+/** Tokens credited for a given KES amount at the flat rate (1 token = kesPerToken KES). */
 export function resolveTokensForTopupKes(amountKes: number): number {
-  const rounded = Math.round(amountKes);
-  const pack = findPackByKes(rounded);
-  if (pack) return pack.tokens;
-  return tokensFromCustomKes(rounded);
+  return tokensFromCustomKes(Math.round(amountKes));
 }
 
 export function normalizeKenyaPhone(input: string): string {

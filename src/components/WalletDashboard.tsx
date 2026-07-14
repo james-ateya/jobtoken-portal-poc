@@ -65,8 +65,8 @@ export function WalletDashboard({
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [packs, setPacks] = useState<TokenPack[]>([
     { kes: 100, tokens: 5 },
-    { kes: 200, tokens: 12 },
-    { kes: 500, tokens: 35 },
+    { kes: 500, tokens: 25 },
+    { kes: 1000, tokens: 50 },
   ]);
   const [selectedKes, setSelectedKes] = useState(100);
   const [customAmount, setCustomAmount] = useState("");
@@ -270,11 +270,7 @@ export function WalletDashboard({
   const effectiveKes = customActive
     ? customParsed!
     : selectedPack?.kes ?? selectedKes;
-  const previewTokens = (() => {
-    const p = packs.find((x) => x.kes === effectiveKes);
-    if (p) return p.tokens;
-    return Math.floor(effectiveKes / kesPerToken);
-  })();
+  const previewTokens = Math.floor(effectiveKes / kesPerToken);
 
   return (
     <div className="p-8 rounded-3xl border border-white/10 bg-gradient-to-br from-zinc-900 to-black shadow-2xl relative overflow-hidden min-h-[400px]">
@@ -413,8 +409,7 @@ export function WalletDashboard({
                     Or enter amount (Ksh)
                   </label>
                   <p className="text-[11px] text-zinc-600 leading-snug">
-                    If you type an amount here, it is used instead of a pack. Tokens = pack match if
-                    exact, otherwise floor(amount ÷ {kesPerToken}) (min Ksh {minTopupKes}).
+                    Type any amount and get 1 token per Ksh {kesPerToken} (min Ksh {minTopupKes}).
                   </p>
                   <input
                     type="number"
