@@ -71,7 +71,7 @@ export async function analyzeSubmission(
   let response;
   try {
     response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-3.5-flash",
       contents: `You are a submission quality analyzer for a job-token platform where seekers answer prompts to earn rewards. Analyze the submitted answer against the prompt instructions and return a JSON object.
 
 PROMPT INSTRUCTIONS:
@@ -132,7 +132,7 @@ export async function checkPlagiarism(
   let response;
   try {
     response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-3.5-flash",
       contents: `Compare the MAIN ANSWER against the OTHER ANSWERS submitted for the same prompt. Check for plagiarism or near-identical copying.
 
 Return ONLY valid JSON (no markdown fencing):
