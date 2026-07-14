@@ -67,6 +67,8 @@ import { processTokenExpiryReminders } from "./token-expiry-reminders.js";
 import { sendAccountRegretEmail } from "./account-regret-email.js";
 import { blacklistEmail, getBlacklistForEmail, isEmailBlacklisted, isSchemaMissingError, loadBlacklistForEmails } from "./email-blacklist.js";
 import { fetchRowsInIdBatches } from "./query-batches.js";
+import { isQualityCheckEnabled, analyzeAndStoreReport } from "./submission-quality.js";
+import { getRewardCapConfig } from "./reward-cap.js";
 import { paginationMeta, parsePageParams } from "./pagination.js";
 import { tryReactivateAccountOnTokenCredit } from "./reactivate-on-token-credit.js";
 import { processStkCallback } from "./process-stk-callback.js";
@@ -3120,7 +3122,7 @@ app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
   try {
     const { data: prompt, error: pErr } = await supabaseAdmin
       .from("prompts")
-      .select("id, submit_cost_tokens, word_limit, series_id, is_published")
+      .select("id, submit_cost_tokens, word_limit, series_id, is_published, instructions")
       .eq("id", promptId)
       .single();
 
@@ -3214,6 +3216,16 @@ app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
     }
 
     res.json({ success: true, submissionId: submission?.id });
+
+    if (isQualityCheckEnabled() && submission?.id) {
+      analyzeAndStoreReport(
+        supabaseAdmin,
+        submission.id,
+        prompt.instructions ?? "",
+        answerText,
+        promptId
+      ).catch((err) => console.error("quality check:", err));
+    }
   } catch (error: any) {
     console.error("prompt submit:", error);
     res.status(500).json({ error: error.message || "Submit failed" });
@@ -3500,54 +3512,58 @@ app.post("/api/admin/prompt-submissions/:submissionId/grade", requireAdminMw, as
       return res.status(400).json({ error: row?.error || "Cannot grade submission" });
     }
 
+    const skipEmail = body.skipEmail === true || body.skip_email === true;
+
     let emailSent = false;
-    try {
-      const { data: submission, error: subErr } = await supabaseAdmin
-        .from("prompt_submissions")
-        .select("user_id, prompt_id")
-        .eq("id", submissionId)
-        .maybeSingle();
-      if (subErr) throw subErr;
-      if (submission) {
-        const [{ data: profile }, { data: prompt }] = await Promise.all([
-          supabaseAdmin
-            .from("profiles")
-            .select("email, full_name")
-            .eq("id", submission.user_id)
-            .maybeSingle(),
-          supabaseAdmin
-            .from("prompts")
-            .select("headline, reward_kes, series_id")
-            .eq("id", submission.prompt_id)
-            .maybeSingle(),
-        ]);
+    if (!skipEmail) {
+      try {
+        const { data: submission, error: subErr } = await supabaseAdmin
+          .from("prompt_submissions")
+          .select("user_id, prompt_id")
+          .eq("id", submissionId)
+          .maybeSingle();
+        if (subErr) throw subErr;
+        if (submission) {
+          const [{ data: profile }, { data: prompt }] = await Promise.all([
+            supabaseAdmin
+              .from("profiles")
+              .select("email, full_name")
+              .eq("id", submission.user_id)
+              .maybeSingle(),
+            supabaseAdmin
+              .from("prompts")
+              .select("headline, reward_kes, series_id")
+              .eq("id", submission.prompt_id)
+              .maybeSingle(),
+          ]);
 
-        let seriesTitle: string | null = null;
-        if (prompt?.series_id) {
-          const { data: series } = await supabaseAdmin
-            .from("prompt_series")
-            .select("title")
-            .eq("id", prompt.series_id)
-            .maybeSingle();
-          seriesTitle = series?.title ?? null;
-        }
+          let seriesTitle: string | null = null;
+          if (prompt?.series_id) {
+            const { data: series } = await supabaseAdmin
+              .from("prompt_series")
+              .select("title")
+              .eq("id", prompt.series_id)
+              .maybeSingle();
+            seriesTitle = series?.title ?? null;
+          }
 
-        if (profile?.email) {
-          await sendPromptGradingEmail({
-            to: profile.email,
-            fullName: profile.full_name,
-            grade,
-            promptHeadline: prompt?.headline ?? "Prompt task",
-            seriesTitle,
-            rewardKes: Number(prompt?.reward_kes || 0),
-            earningsAdjustmentKes: Number(row.earnings_adjustment_kes || 0),
-            gradingNote,
-          });
-          emailSent = true;
+          if (profile?.email) {
+            await sendPromptGradingEmail({
+              to: profile.email,
+              fullName: profile.full_name,
+              grade,
+              promptHeadline: prompt?.headline ?? "Prompt task",
+              seriesTitle,
+              rewardKes: Number(prompt?.reward_kes || 0),
+              earningsAdjustmentKes: Number(row.earnings_adjustment_kes || 0),
+              gradingNote,
+            });
+            emailSent = true;
+          }
         }
+      } catch (mailErr) {
+        console.error("Prompt grading email:", mailErr);
       }
-    } catch (mailErr) {
-      console.error("Prompt grading email:", mailErr);
     }
 
     res.json({
@@ -3594,7 +3610,7 @@ app.get("/api/admin/prompt-submissions", requireAdminMw, async (req, res) => {
     let subq = supabaseAdmin
       .from("prompt_submissions")
       .select(
-        "id, user_id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at"
+        "id, user_id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, quality_report, quality_checked_at"
       );
     if (effectiveStatus) subq = subq.eq("grade_status", effectiveStatus);
 
@@ -3662,6 +3678,161 @@ app.get("/api/admin/prompt-submissions", requireAdminMw, async (req, res) => {
       totalPages: Math.ceil(totalN / pageSize) || 0,
     });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/prompt-submissions/:submissionId/quality-check", requireAdminMw, async (req, res) => {
+  const { submissionId } = req.params;
+  try {
+    const { data: sub, error: subErr } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select("id, prompt_id, answer_text")
+      .eq("id", submissionId)
+      .maybeSingle();
+    if (subErr) throw subErr;
+    if (!sub) return res.status(404).json({ error: "Submission not found" });
+
+    const { data: prompt } = await supabaseAdmin
+      .from("prompts")
+      .select("instructions")
+      .eq("id", sub.prompt_id)
+      .maybeSingle();
+
+    const { analyzeAndStoreReport: runReport } = await import("./submission-quality.js");
+    await runReport(supabaseAdmin, sub.id, prompt?.instructions ?? "", sub.answer_text, sub.prompt_id);
+
+    const { data: updated } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select("quality_report, quality_checked_at")
+      .eq("id", submissionId)
+      .maybeSingle();
+
+    res.json({ success: true, quality_report: updated?.quality_report ?? null, quality_checked_at: updated?.quality_checked_at ?? null });
+  } catch (error: any) {
+    console.error("manual quality check:", error);
+    res.status(500).json({ error: error.message || "Quality check failed" });
+  }
+});
+
+app.get("/api/admin/platform-health", requireAdminMw, async (_req, res) => {
+  try {
+    const { data: topups, error: tErr } = await supabaseAdmin
+      .from("transactions")
+      .select("amount_kes")
+      .eq("type", "topup")
+      .eq("status", "completed");
+    if (tErr) throw tErr;
+    const total_revenue_kes = (topups ?? []).reduce((s, r) => s + Number(r.amount_kes ?? 0), 0);
+
+    const { data: rewards, error: rErr } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select("amount_kes, entry_type")
+      .in("entry_type", ["reward_credit", "adjustment", "reversal"]);
+    if (rErr) throw rErr;
+    const total_rewards_kes = (rewards ?? []).reduce((s, r) => s + Number(r.amount_kes ?? 0), 0);
+
+    const health_ratio = total_rewards_kes > 0 ? Math.round((total_revenue_kes / total_rewards_kes) * 100) / 100 : null;
+    const health_status: "healthy" | "acceptable" | "warning" | "critical" =
+      health_ratio === null ? "healthy"
+        : health_ratio >= 2 ? "healthy"
+        : health_ratio >= 1.5 ? "acceptable"
+        : health_ratio >= 1 ? "warning"
+        : "critical";
+
+    const { data: statsRows } = await supabaseAdmin
+      .from("prompt_submission_stats")
+      .select("*");
+
+    const prompt_stats = (statsRows ?? []).map((r: any) => ({
+      prompt_id: r.prompt_id,
+      headline: r.headline,
+      series_title: r.series_title,
+      total_submissions: Number(r.total_submissions),
+      passed: Number(r.passed),
+      failed: Number(r.failed),
+      pending: Number(r.pending),
+      pass_rate: Number(r.pass_rate),
+      reward_kes: Number(r.reward_kes),
+      submit_cost_tokens: Number(r.submit_cost_tokens),
+      total_rewarded_kes: Number(r.passed) * Number(r.reward_kes),
+      total_revenue_tokens: Number(r.total_submissions) * Number(r.submit_cost_tokens),
+    }));
+
+    res.json({
+      total_revenue_kes: Math.round(total_revenue_kes * 100) / 100,
+      total_rewards_kes: Math.round(total_rewards_kes * 100) / 100,
+      health_ratio,
+      health_status,
+      prompt_stats,
+      reward_cap_config: getRewardCapConfig(),
+    });
+  } catch (error: any) {
+    console.error("platform health:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/prompts/:promptId/submissions", requireAdminMw, async (req, res) => {
+  const { promptId } = req.params;
+  try {
+    const { data: prompt, error: pErr } = await supabaseAdmin
+      .from("prompts")
+      .select("id, headline, reward_kes, submit_cost_tokens, series_id")
+      .eq("id", promptId)
+      .maybeSingle();
+    if (pErr) throw pErr;
+    if (!prompt) return res.status(404).json({ error: "Prompt not found" });
+
+    let seriesTitle: string | null = null;
+    if (prompt.series_id) {
+      const { data: series } = await supabaseAdmin
+        .from("prompt_series")
+        .select("title")
+        .eq("id", prompt.series_id)
+        .maybeSingle();
+      seriesTitle = series?.title ?? null;
+    }
+
+    const { data: subs, error: sErr } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select("id, user_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, grading_note")
+      .eq("prompt_id", promptId)
+      .order("grade_status", { ascending: true })
+      .order("submitted_at", { ascending: false });
+    if (sErr) throw sErr;
+
+    const userIds = [...new Set((subs ?? []).map((s: any) => s.user_id))];
+    const profileMap = new Map<string, { email: string | null; full_name: string | null }>();
+    if (userIds.length > 0) {
+      const profiles = await fetchRowsInIdBatches<{ id: string; email: string | null; full_name: string | null }>(
+        userIds,
+        (chunk) => supabaseAdmin.from("profiles").select("id, email, full_name").in("id", chunk)
+      );
+      for (const p of profiles) profileMap.set(p.id, { email: p.email, full_name: p.full_name });
+    }
+
+    const submissions = (subs ?? []).map((s: any) => {
+      const profile = profileMap.get(s.user_id);
+      return {
+        ...s,
+        seeker_name: profile?.full_name ?? null,
+        seeker_email: profile?.email ?? null,
+      };
+    });
+
+    res.json({
+      prompt: {
+        id: prompt.id,
+        headline: prompt.headline,
+        reward_kes: Number(prompt.reward_kes),
+        submit_cost_tokens: Number(prompt.submit_cost_tokens),
+        series_title: seriesTitle,
+      },
+      submissions,
+    });
+  } catch (error: any) {
+    console.error("prompt submissions:", error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,7 +1,19 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { CheckCircle, Loader2, X, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, X, XCircle, ShieldAlert, RefreshCw } from "lucide-react";
 import { cn } from "../lib/utils";
+import { apiFetch } from "../lib/apiFetch";
+
+type QualityReport = {
+  ai_probability: number;
+  relevance_score: number;
+  spelling_grammar_score: number;
+  effort_score: number;
+  flags: string[];
+  recommendation: "pass" | "review" | "fail";
+  summary: string;
+  plagiarism?: { is_plagiarized: boolean; similarity_score: number };
+};
 
 export type PromptReviewSubmission = {
   id: string;
@@ -16,6 +28,9 @@ export type PromptReviewSubmission = {
   seeker_email?: string | null;
   seeker_name?: string | null;
   grading_note?: string | null;
+  quality_report?: QualityReport | null;
+  quality_checked_at?: string | null;
+  pass_rate?: number | null;
 };
 
 type PromptSubmissionReviewModalProps = {
@@ -26,6 +41,41 @@ type PromptSubmissionReviewModalProps = {
   seekerLabel?: string;
 };
 
+function ScoreBar({ label, value, invertColor }: { label: string; value: number; invertColor?: boolean }) {
+  const effective = invertColor ? 100 - value : value;
+  const color =
+    effective >= 70 ? "bg-emerald-500" : effective >= 40 ? "bg-amber-500" : "bg-red-500";
+  const textColor =
+    effective >= 70 ? "text-emerald-400" : effective >= 40 ? "text-amber-400" : "text-red-400";
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-zinc-400">{label}</span>
+        <span className={cn("font-bold", textColor)}>{value}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+        <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${value}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function RecommendationBadge({ rec }: { rec: "pass" | "review" | "fail" }) {
+  const cls =
+    rec === "pass"
+      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+      : rec === "fail"
+        ? "bg-red-500/15 text-red-400 border-red-500/30"
+        : "bg-amber-500/15 text-amber-400 border-amber-500/30";
+  return (
+    <span className={cn("inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold uppercase border", cls)}>
+      {rec === "pass" ? <CheckCircle className="w-3 h-3" /> : rec === "fail" ? <XCircle className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
+      {rec}
+    </span>
+  );
+}
+
 export function PromptSubmissionReviewModal({
   submission,
   gradingId,
@@ -34,11 +84,14 @@ export function PromptSubmissionReviewModal({
   seekerLabel,
 }: PromptSubmissionReviewModalProps) {
   const [gradingNote, setGradingNote] = useState(submission.grading_note ?? "");
+  const [qr, setQr] = useState<QualityReport | null>(submission.quality_report ?? null);
+  const [qrLoading, setQrLoading] = useState(false);
   const busy = gradingId === submission.id;
 
   useEffect(() => {
     setGradingNote(submission.grading_note ?? "");
-  }, [submission.id, submission.grading_note]);
+    setQr(submission.quality_report ?? null);
+  }, [submission.id, submission.grading_note, submission.quality_report]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -48,11 +101,36 @@ export function PromptSubmissionReviewModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [busy, onClose]);
 
+  const [qrError, setQrError] = useState<string | null>(null);
+
+  const runQualityCheck = async () => {
+    setQrLoading(true);
+    setQrError(null);
+    try {
+      const res = await apiFetch(`/api/admin/prompt-submissions/${submission.id}/quality-check`, {
+        method: "POST",
+      });
+      const j = await res.json().catch(() => ({}));
+      if (j.quality_report) {
+        setQr(j.quality_report);
+      } else if (j.error) {
+        setQrError(j.error);
+      }
+    } catch {
+      setQrError("Network error — could not reach the server");
+    } finally {
+      setQrLoading(false);
+    }
+  };
+
   const seekerDisplay =
     seekerLabel ||
     (submission.seeker_name || submission.seeker_email
       ? `${submission.seeker_name || "—"} · ${submission.seeker_email || ""}`
       : null);
+
+  const passRate = submission.pass_rate != null ? Number(submission.pass_rate) : null;
+  const passRateWarning = passRate !== null && passRate > 0.50;
 
   return (
     <div
@@ -120,6 +198,14 @@ export function PromptSubmissionReviewModal({
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4 border-b border-white/10">
+          {passRateWarning && (
+            <div className="rounded-xl bg-amber-500/10 border border-amber-500/25 px-4 py-3 text-xs text-amber-300">
+              <span className="font-bold">Pass rate warning:</span> This prompt has a{" "}
+              {(passRate! * 100).toFixed(0)}% pass rate (target: 50%). Consider tightening criteria or
+              reducing the reward.
+            </div>
+          )}
+
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
               Seeker answer
@@ -127,6 +213,67 @@ export function PromptSubmissionReviewModal({
             <p className="text-sm text-zinc-200 whitespace-pre-wrap leading-relaxed rounded-xl bg-black/30 border border-white/5 p-4">
               {submission.answer_text}
             </p>
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                AI Quality Report
+              </p>
+              <button
+                type="button"
+                onClick={runQualityCheck}
+                disabled={qrLoading}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 border border-white/10 text-zinc-400 hover:text-white hover:bg-white/10 disabled:opacity-40"
+              >
+                {qrLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                {qr ? "Re-check" : "Run check"}
+              </button>
+            </div>
+            {qr ? (
+              <>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <RecommendationBadge rec={qr.recommendation} />
+                  {submission.quality_checked_at && (
+                    <span className="text-[10px] text-zinc-600">
+                      Checked {new Date(submission.quality_checked_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <ScoreBar label="AI probability" value={qr.ai_probability} invertColor />
+                  <ScoreBar label="Relevance" value={qr.relevance_score} />
+                  <ScoreBar label="Spelling & grammar" value={qr.spelling_grammar_score} />
+                  <ScoreBar label="Effort" value={qr.effort_score} />
+                </div>
+                {qr.flags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {qr.flags.map((f, i) => (
+                      <span
+                        key={i}
+                        className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-red-500/10 border border-red-500/20 text-red-400"
+                      >
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {qr.summary && (
+                  <p className="text-xs text-zinc-400 leading-relaxed">{qr.summary}</p>
+                )}
+              </>
+            ) : (
+              <div className="space-y-2">
+                {qrError && (
+                  <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                    {qrError}
+                  </p>
+                )}
+                <p className="text-xs text-zinc-600">
+                  {qrLoading ? "Analyzing submission..." : "No quality report yet. Click \"Run check\" to analyze."}
+                </p>
+              </div>
+            )}
           </div>
 
           <div>

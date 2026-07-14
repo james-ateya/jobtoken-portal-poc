@@ -8,6 +8,16 @@ import {
   type PromptReviewSubmission,
 } from "../components/PromptSubmissionReviewModal";
 
+type QualityReportRow = {
+  ai_probability: number;
+  relevance_score: number;
+  spelling_grammar_score: number;
+  effort_score: number;
+  flags: string[];
+  recommendation: "pass" | "review" | "fail";
+  summary: string;
+} | null;
+
 type SubmissionRow = {
   id: string;
   user_id: string;
@@ -23,6 +33,8 @@ type SubmissionRow = {
   seeker_email: string | null;
   seeker_name: string | null;
   grading_note?: string | null;
+  quality_report?: QualityReportRow;
+  quality_checked_at?: string | null;
 };
 
 function toReviewSubmission(row: SubmissionRow): PromptReviewSubmission {
@@ -39,7 +51,26 @@ function toReviewSubmission(row: SubmissionRow): PromptReviewSubmission {
     seeker_email: row.seeker_email,
     seeker_name: row.seeker_name,
     grading_note: row.grading_note ?? null,
+    quality_report: row.quality_report ?? null,
+    quality_checked_at: row.quality_checked_at ?? null,
   };
+}
+
+function QualityDot({ report }: { report: QualityReportRow }) {
+  if (!report) return null;
+  const rec = report.recommendation;
+  const cls =
+    rec === "pass"
+      ? "bg-emerald-500"
+      : rec === "fail"
+        ? "bg-red-500"
+        : "bg-amber-500";
+  return (
+    <span
+      className={`inline-block w-2.5 h-2.5 rounded-full ${cls}`}
+      title={`AI recommendation: ${rec}`}
+    />
+  );
 }
 
 export function AdminPromptGradingPage({
@@ -180,9 +211,12 @@ export function AdminPromptGradingPage({
               className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/90">
-                  {s.series_title || "Series"}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/90">
+                    {s.series_title || "Series"}
+                  </p>
+                  <QualityDot report={s.quality_report ?? null} />
+                </div>
                 <h2 className="font-bold text-base mt-0.5 truncate">{s.prompt_headline || "Prompt"}</h2>
                 <p className="text-sm text-zinc-500 mt-1 truncate">
                   {s.seeker_name || "—"} · {s.seeker_email || s.user_id}

@@ -19,6 +19,8 @@ import { AdminWithdrawalsPage } from "./pages/AdminWithdrawalsPage";
 import { AdminPayoutPlanningPage } from "./pages/AdminPayoutPlanningPage";
 import { AdminPayoutUserDetailPage } from "./pages/AdminPayoutUserDetailPage";
 import { AdminMarketingPage } from "./pages/AdminMarketingPage";
+import { AdminPlatformHealthPage } from "./pages/AdminPlatformHealthPage";
+import { AdminPromptReviewPage } from "./pages/AdminPromptReviewPage";
 import { SeekerProfilePage } from "./pages/SeekerProfile";
 import { EmployerProfilePage } from "./pages/EmployerProfile";
 import { SeekerApplicationsPage } from "./pages/SeekerApplications";
@@ -637,6 +639,38 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminMarketingPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/platform-health"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminPlatformHealthPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/prompts/:promptId/review"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminPromptReviewPage showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />

@@ -42,6 +42,14 @@ const emptyPromptForm = {
   is_published: true,
 };
 
+const KES_PER_TOKEN = 20;
+const PLATFORM_MARGIN = 0.40;
+const TARGET_PASS_RATE = 0.50;
+
+function calcMaxRewardKes(costTokens: number): number {
+  return (costTokens * KES_PER_TOKEN * (1 - PLATFORM_MARGIN)) / TARGET_PASS_RATE;
+}
+
 export function EmployerPromptSeriesEditorPage({
   user,
   showToast,
@@ -182,6 +190,14 @@ export function EmployerPromptSeriesEditorPage({
     }
     if (!Number.isFinite(cost) || cost < 1) {
       showToast("Submit cost must be at least 1 token", "error");
+      return;
+    }
+    const maxR = calcMaxRewardKes(cost);
+    if (reward > maxR) {
+      showToast(
+        `Reward KES ${reward} exceeds the safe maximum of ${Math.floor(maxR)} KES for ${cost} token(s). Reduce the reward or increase the submit cost.`,
+        "error"
+      );
       return;
     }
     const wl = parseWordLimit();
@@ -534,6 +550,39 @@ export function EmployerPromptSeriesEditorPage({
                   />
                 </div>
               </div>
+              {(() => {
+                const cost = parseInt(String(promptForm.submit_cost_tokens), 10) || 1;
+                const reward = parseFloat(String(promptForm.reward_kes)) || 0;
+                const maxR = calcMaxRewardKes(cost);
+                const over = reward > maxR;
+                return (
+                  <div
+                    className={`rounded-xl px-4 py-3 text-xs ${
+                      over
+                        ? "bg-red-500/10 border border-red-500/30 text-red-300"
+                        : "bg-emerald-500/5 border border-emerald-500/15 text-zinc-400"
+                    }`}
+                  >
+                    <p>
+                      <span className="font-semibold text-zinc-300">Max safe reward:</span>{" "}
+                      <span className={over ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
+                        {Math.floor(maxR).toLocaleString("en-KE")} KES
+                      </span>{" "}
+                      for {cost} token{cost !== 1 ? "s" : ""} ({cost * KES_PER_TOKEN} KES revenue)
+                    </p>
+                    {over && (
+                      <p className="mt-1 font-semibold text-red-400">
+                        Reward exceeds the safe cap. Reduce it or increase the submit cost.
+                      </p>
+                    )}
+                    <p className="mt-1 text-zinc-500">
+                      Formula: ({cost} tokens &times; {KES_PER_TOKEN} KES &times;{" "}
+                      {((1 - PLATFORM_MARGIN) * 100).toFixed(0)}% margin) &divide;{" "}
+                      {(TARGET_PASS_RATE * 100).toFixed(0)}% pass rate
+                    </p>
+                  </div>
+                );
+              })()}
               <div>
                 <label className="text-xs font-bold uppercase text-zinc-500">
                   Word limit (optional)
@@ -571,7 +620,11 @@ export function EmployerPromptSeriesEditorPage({
                 </button>
                 <button
                   type="submit"
-                  disabled={savingPrompt}
+                  disabled={
+                    savingPrompt ||
+                    (parseFloat(String(promptForm.reward_kes)) || 0) >
+                      calcMaxRewardKes(parseInt(String(promptForm.submit_cost_tokens), 10) || 1)
+                  }
                   className="px-5 py-2 rounded-xl bg-emerald-500 text-black font-bold disabled:opacity-50"
                 >
                   {savingPrompt ? "Saving…" : promptMode === "create" ? "Add prompt" : "Save prompt"}
