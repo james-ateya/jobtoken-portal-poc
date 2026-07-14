@@ -1,4 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type QualityReport = {
@@ -22,9 +21,10 @@ export function isQualityCheckEnabled(): boolean {
   return v === "true" || v === "1" || v === "yes";
 }
 
-function getGeminiClient(): GoogleGenAI | null {
+async function getGeminiClient() {
   const key = process.env.GEMINI_API_KEY;
   if (!key || key === "your-gemini-api-key") return null;
+  const { GoogleGenAI } = await import("@google/genai");
   return new GoogleGenAI({ apiKey: key });
 }
 
@@ -64,7 +64,7 @@ export async function analyzeSubmission(
   promptInstructions: string,
   answerText: string
 ): Promise<QualityReport> {
-  const ai = getGeminiClient();
+  const ai = await getGeminiClient();
   if (!ai) throw new Error("Gemini API key not configured. Add a valid GEMINI_API_KEY to your environment.");
   if (isRateLimited()) throw new Error("Gemini rate limit reached — try again in a minute");
 
@@ -120,7 +120,7 @@ export async function checkPlagiarism(
     return { is_plagiarized: false, similarity_score: 0, most_similar_index: null };
   }
 
-  const ai = getGeminiClient();
+  const ai = await getGeminiClient();
   if (!ai) throw new Error("Gemini API key not configured");
   if (isRateLimited()) throw new Error("Gemini rate limit reached — try later");
 

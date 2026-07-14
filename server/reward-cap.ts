@@ -1,4 +1,4 @@
-import { getKesPerToken } from "./mpesa";
+import { getKesPerToken } from "./mpesa.js";
 
 const DEFAULT_MARGIN = 0.40;
 const DEFAULT_PASS_RATE = 0.50;
