@@ -159,30 +159,30 @@ export function PromptSubmitModal({
                 <h2 id="prompt-submit-title" className="text-lg font-bold text-white">
                   {prompt.headline}
                 </h2>
-                <div className="flex flex-wrap gap-3 mt-2 text-xs text-zinc-400">
+                <div className="flex flex-wrap items-center gap-3 mt-3">
                   <span
                     className={cn(
-                      "inline-flex items-center gap-1 font-semibold tabular-nums",
+                      "inline-flex items-center gap-1.5 font-bold tabular-nums rounded-lg px-3 py-1.5",
                       timeExpired
-                        ? "text-red-400"
+                        ? "text-red-300 bg-red-500/15 ring-1 ring-red-500/30 text-lg"
                         : secondsLeft <= 300
-                          ? "text-amber-400"
-                          : "text-zinc-300"
+                          ? "text-amber-300 bg-amber-500/15 ring-1 ring-amber-500/30 text-lg animate-pulse"
+                          : "text-cyan-300 bg-cyan-500/10 ring-1 ring-cyan-500/20 text-lg"
                     )}
                   >
-                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    <Clock className="w-5 h-5 shrink-0" />
                     {timeExpired ? "Time expired" : `${formatCountdown(secondsLeft)} left`}
                   </span>
-                  <span className="inline-flex items-center gap-1 text-emerald-400/90">
+                  <span className="inline-flex items-center gap-1 text-xs text-emerald-400/90">
                     <Banknote className="w-3.5 h-3.5" />
                     {formatKes(prompt.reward_kes)} KES reward
                   </span>
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
                     <Coins className="w-3.5 h-3.5 text-amber-400" />
                     {cost} tokens to submit
                   </span>
                   {prompt.word_limit != null ? (
-                    <span>Max {prompt.word_limit} words</span>
+                    <span className="text-xs text-zinc-400">Max {prompt.word_limit} words</span>
                   ) : null}
                 </div>
               </div>
@@ -236,6 +236,13 @@ export function PromptSubmitModal({
                   You need {cost} tokens to submit this answer ({tokenBalance} available).
                 </p>
               ) : null}
+
+              <div className="flex items-start gap-2.5 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] px-4 py-3 text-sm text-cyan-300/90">
+                <Clock className="w-4 h-4 shrink-0 mt-0.5 text-cyan-400" />
+                <span>
+                  Review of your answer can take up to <strong className="text-cyan-200">24 hours</strong> depending on traffic. You will receive an email once the review is complete.
+                </span>
+              </div>
 
               <div className="flex flex-wrap gap-3 justify-end pt-2">
                 <button

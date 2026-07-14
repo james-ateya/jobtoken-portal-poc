@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { normalizeEmail } from "./auth-otp.js";
 import { sendSeekerWelcomeEmail } from "./seeker-welcome-email.js";
 import { sendPromptGradingEmail } from "./prompt-grading-email.js";
+import { sendPromptSubmissionEmail } from "./prompt-submission-email.js";
 import {
   completePasswordReset,
   issuePasswordResetOtp,
@@ -3122,7 +3123,7 @@ app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
   try {
     const { data: prompt, error: pErr } = await supabaseAdmin
       .from("prompts")
-      .select("id, submit_cost_tokens, word_limit, series_id, is_published, instructions")
+      .select("id, headline, submit_cost_tokens, word_limit, series_id, is_published, instructions")
       .eq("id", promptId)
       .single();
 
@@ -3135,7 +3136,7 @@ app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
 
     const { data: ser } = await supabaseAdmin
       .from("prompt_series")
-      .select("status")
+      .select("status, title")
       .eq("id", prompt.series_id)
       .single();
 
@@ -3226,6 +3227,28 @@ app.post("/api/prompts/submit", requireSeekerMw, async (req, res) => {
         promptId
       ).catch((err) => console.error("quality check:", err));
     }
+
+    (async () => {
+      try {
+        const { data: profile } = await supabaseAdmin
+          .from("profiles")
+          .select("email, full_name")
+          .eq("id", userId)
+          .single();
+        if (profile?.email) {
+          await sendPromptSubmissionEmail({
+            to: profile.email,
+            fullName: profile.full_name,
+            promptHeadline: prompt.headline ?? "Prompt task",
+            seriesTitle: ser?.title ?? null,
+            wordCount: wc,
+            tokensCharged: cost,
+          });
+        }
+      } catch (emailErr) {
+        console.error("submission confirmation email:", emailErr);
+      }
+    })();
   } catch (error: any) {
     console.error("prompt submit:", error);
     res.status(500).json({ error: error.message || "Submit failed" });
