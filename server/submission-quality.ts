@@ -28,16 +28,45 @@ async function getGeminiClient() {
   return new GoogleGenAI({ apiKey: key });
 }
 
-const RATE_WINDOW_MS = 60_000;
-const MAX_RPM = 14;
-let rateSlots: number[] = [];
+const FREE_TIER_RPM = 5;
+const FREE_TIER_RPD = 1500;
+const MINUTE_MS = 60_000;
+const DAY_MS = 86_400_000;
+
+let minuteSlots: number[] = [];
+let daySlots: number[] = [];
+
+function pruneSlots() {
+  const now = Date.now();
+  minuteSlots = minuteSlots.filter((t) => now - t < MINUTE_MS);
+  daySlots = daySlots.filter((t) => now - t < DAY_MS);
+}
 
 function isRateLimited(): boolean {
+  pruneSlots();
+  if (minuteSlots.length >= FREE_TIER_RPM || daySlots.length >= FREE_TIER_RPD) return true;
   const now = Date.now();
-  rateSlots = rateSlots.filter((t) => now - t < RATE_WINDOW_MS);
-  if (rateSlots.length >= MAX_RPM) return true;
-  rateSlots.push(now);
+  minuteSlots.push(now);
+  daySlots.push(now);
   return false;
+}
+
+export function getGeminiQuotaStatus() {
+  pruneSlots();
+  const now = Date.now();
+  const usedRpm = minuteSlots.length;
+  const usedRpd = daySlots.length;
+  const oldestMinuteSlot = minuteSlots.length > 0 ? minuteSlots[0] : null;
+  const cooldownMs = usedRpm >= FREE_TIER_RPM && oldestMinuteSlot
+    ? Math.max(0, MINUTE_MS - (now - oldestMinuteSlot))
+    : 0;
+
+  return {
+    rpm: { used: usedRpm, limit: FREE_TIER_RPM },
+    rpd: { used: usedRpd, limit: FREE_TIER_RPD },
+    cooldown_ms: cooldownMs,
+    available: usedRpm < FREE_TIER_RPM && usedRpd < FREE_TIER_RPD,
+  };
 }
 
 function extractJson(text: string): string {

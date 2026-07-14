@@ -68,7 +68,7 @@ import { processTokenExpiryReminders } from "./token-expiry-reminders.js";
 import { sendAccountRegretEmail } from "./account-regret-email.js";
 import { blacklistEmail, getBlacklistForEmail, isEmailBlacklisted, isSchemaMissingError, loadBlacklistForEmails } from "./email-blacklist.js";
 import { fetchRowsInIdBatches } from "./query-batches.js";
-import { isQualityCheckEnabled, analyzeAndStoreReport } from "./submission-quality.js";
+import { isQualityCheckEnabled, analyzeAndStoreReport, getGeminiQuotaStatus } from "./submission-quality.js";
 import { getRewardCapConfig } from "./reward-cap.js";
 import { paginationMeta, parsePageParams } from "./pagination.js";
 import { tryReactivateAccountOnTokenCredit } from "./reactivate-on-token-credit.js";
@@ -3736,6 +3736,10 @@ app.post("/api/admin/prompt-submissions/:submissionId/quality-check", requireAdm
     console.error("manual quality check:", error);
     res.status(500).json({ error: error.message || "Quality check failed" });
   }
+});
+
+app.get("/api/admin/gemini-quota", requireAdminMw, (_req, res) => {
+  res.json(getGeminiQuotaStatus());
 });
 
 app.get("/api/admin/platform-health", requireAdminMw, async (_req, res) => {

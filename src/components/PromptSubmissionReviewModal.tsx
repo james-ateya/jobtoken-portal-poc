@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { CheckCircle, Loader2, X, XCircle, ShieldAlert, RefreshCw } from "lucide-react";
+import { CheckCircle, Loader2, X, XCircle, ShieldAlert, RefreshCw, Gauge, Timer } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
 
@@ -61,6 +61,75 @@ function ScoreBar({ label, value, invertColor }: { label: string; value: number;
   );
 }
 
+type GeminiQuota = {
+  rpm: { used: number; limit: number };
+  rpd: { used: number; limit: number };
+  cooldown_ms: number;
+  available: boolean;
+};
+
+function GeminiQuotaBar({ quota, cooldownSec }: { quota: GeminiQuota | null; cooldownSec: number }) {
+  if (!quota) return null;
+  const rpmPct = Math.min(100, (quota.rpm.used / quota.rpm.limit) * 100);
+  const rpdPct = Math.min(100, (quota.rpd.used / quota.rpd.limit) * 100);
+  const isBlocked = !quota.available;
+
+  return (
+    <div className={cn(
+      "rounded-xl border px-4 py-3 space-y-2.5 text-xs",
+      isBlocked
+        ? "bg-red-500/5 border-red-500/20"
+        : "bg-white/[0.02] border-white/10"
+    )}>
+      <div className="flex items-center gap-2">
+        <Gauge className="w-3.5 h-3.5 text-zinc-400" />
+        <span className="font-bold uppercase tracking-widest text-[10px] text-zinc-500">
+          Gemini Free Tier Usage
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <div className="flex justify-between text-zinc-400">
+            <span>RPM</span>
+            <span className={cn("font-bold", rpmPct >= 100 ? "text-red-400" : rpmPct >= 80 ? "text-amber-400" : "text-emerald-400")}>
+              {quota.rpm.used}/{quota.rpm.limit}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div
+              className={cn("h-full rounded-full transition-all", rpmPct >= 100 ? "bg-red-500" : rpmPct >= 80 ? "bg-amber-500" : "bg-emerald-500")}
+              style={{ width: `${rpmPct}%` }}
+            />
+          </div>
+        </div>
+        <div className="space-y-1">
+          <div className="flex justify-between text-zinc-400">
+            <span>RPD</span>
+            <span className={cn("font-bold", rpdPct >= 100 ? "text-red-400" : rpdPct >= 80 ? "text-amber-400" : "text-emerald-400")}>
+              {quota.rpd.used}/{quota.rpd.limit}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div
+              className={cn("h-full rounded-full transition-all", rpdPct >= 100 ? "bg-red-500" : rpdPct >= 80 ? "bg-amber-500" : "bg-emerald-500")}
+              style={{ width: `${rpdPct}%` }}
+            />
+          </div>
+        </div>
+      </div>
+      {isBlocked && cooldownSec > 0 && (
+        <div className="flex items-center gap-2 text-red-300 bg-red-500/10 rounded-lg px-3 py-2">
+          <Timer className="w-3.5 h-3.5 shrink-0" />
+          <span>Rate limit reached. Next slot in <strong>{cooldownSec}s</strong></span>
+        </div>
+      )}
+      {isBlocked && cooldownSec === 0 && (
+        <p className="text-amber-300 text-[11px]">Daily limit reached (1,500 RPD). Resets at midnight UTC.</p>
+      )}
+    </div>
+  );
+}
+
 function RecommendationBadge({ rec }: { rec: "pass" | "review" | "fail" }) {
   const cls =
     rec === "pass"
@@ -88,6 +157,45 @@ export function PromptSubmissionReviewModal({
   const [qrLoading, setQrLoading] = useState(false);
   const busy = gradingId === submission.id;
 
+  const [quota, setQuota] = useState<GeminiQuota | null>(null);
+  const [cooldownSec, setCooldownSec] = useState(0);
+  const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchQuota = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/admin/gemini-quota");
+      const q: GeminiQuota = await res.json();
+      setQuota(q);
+      if (!q.available && q.cooldown_ms > 0) {
+        setCooldownSec(Math.ceil(q.cooldown_ms / 1000));
+      } else {
+        setCooldownSec(0);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    fetchQuota();
+  }, [fetchQuota]);
+
+  useEffect(() => {
+    if (cooldownSec <= 0) {
+      if (cooldownRef.current) clearInterval(cooldownRef.current);
+      return;
+    }
+    cooldownRef.current = setInterval(() => {
+      setCooldownSec((prev) => {
+        if (prev <= 1) {
+          if (cooldownRef.current) clearInterval(cooldownRef.current);
+          fetchQuota();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => { if (cooldownRef.current) clearInterval(cooldownRef.current); };
+  }, [cooldownSec, fetchQuota]);
+
   useEffect(() => {
     setGradingNote(submission.grading_note ?? "");
     setQr(submission.quality_report ?? null);
@@ -104,6 +212,7 @@ export function PromptSubmissionReviewModal({
   const [qrError, setQrError] = useState<string | null>(null);
 
   const runQualityCheck = async () => {
+    if (quota && !quota.available) return;
     setQrLoading(true);
     setQrError(null);
     try {
@@ -120,6 +229,7 @@ export function PromptSubmissionReviewModal({
       setQrError("Network error — could not reach the server");
     } finally {
       setQrLoading(false);
+      fetchQuota();
     }
   };
 
@@ -215,6 +325,8 @@ export function PromptSubmissionReviewModal({
             </p>
           </div>
 
+          <GeminiQuotaBar quota={quota} cooldownSec={cooldownSec} />
+
           <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">
@@ -223,7 +335,8 @@ export function PromptSubmissionReviewModal({
               <button
                 type="button"
                 onClick={runQualityCheck}
-                disabled={qrLoading}
+                disabled={qrLoading || (quota != null && !quota.available)}
+                title={quota && !quota.available ? "Rate limit reached — wait for cooldown" : undefined}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 border border-white/10 text-zinc-400 hover:text-white hover:bg-white/10 disabled:opacity-40"
               >
                 {qrLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
