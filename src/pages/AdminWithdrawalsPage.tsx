@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "motion/react";
-import { Loader2, Banknote, ArrowLeft, Download, Phone } from "lucide-react";
+import {
+  Loader2,
+  Banknote,
+  ArrowLeft,
+  Download,
+  Phone,
+  TrendingUp,
+  TrendingDown,
+  Wallet,
+  Clock,
+  CheckCircle,
+  FileSpreadsheet,
+} from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
 
@@ -18,6 +30,25 @@ type WithdrawalReq = {
   created_at: string;
   profiles?: { email?: string; full_name?: string; phone?: string } | null;
 };
+
+type PayoutSummary = {
+  total_earnings_credited: number;
+  total_adjustments: number;
+  total_requested: number;
+  total_paid_out: number;
+  total_settled_on_requests: number;
+  outstanding_balance: number;
+  pending_count: number;
+  pending_amount: number;
+  paid_full_count: number;
+  paid_partial_count: number;
+  rejected_count: number;
+  total_requests: number;
+};
+
+function fmtKes(n: number): string {
+  return n.toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 
 function num(v: number | string | undefined): number {
   const n = typeof v === "string" ? parseFloat(v) : Number(v);
@@ -43,6 +74,20 @@ export function AdminWithdrawalsPage({
   const [noteById, setNoteById] = useState<Record<string, string>>({});
   const [statusFilter, setStatusFilter] = useState("all");
   const [exportingCsv, setExportingCsv] = useState(false);
+  const [summary, setSummary] = useState<PayoutSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [exportingPaidCsv, setExportingPaidCsv] = useState(false);
+
+  const loadSummary = useCallback(async () => {
+    setSummaryLoading(true);
+    try {
+      const res = await apiFetch("/api/admin/withdrawal-requests/payout-summary");
+      const j = await res.json().catch(() => ({}));
+      if (res.ok) setSummary(j as PayoutSummary);
+    } catch { /* silent */ } finally {
+      setSummaryLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -69,7 +114,8 @@ export function AdminWithdrawalsPage({
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadSummary();
+  }, [load, loadSummary]);
 
   const setDefaultAmount = (r: WithdrawalReq) => {
     const rem = Math.max(0, num(r.amount_kes_requested) - num(r.amount_paid_kes));
@@ -107,6 +153,7 @@ export function AdminWithdrawalsPage({
       if (!res.ok) throw new Error(j.error || "Settlement failed");
       showToast(`Recorded. Status: ${j.status || "updated"}`, "success");
       load();
+      loadSummary();
     } catch (e: any) {
       showToast(e.message || "Could not settle", "error");
     } finally {
@@ -143,6 +190,33 @@ export function AdminWithdrawalsPage({
       showToast(e.message || "Export failed", "error");
     } finally {
       setExportingCsv(false);
+    }
+  };
+
+  const handleExportPaidCsv = async () => {
+    setExportingPaidCsv(true);
+    try {
+      const res = await apiFetch(
+        `/api/admin/withdrawal-requests/export-csv?status=${encodeURIComponent("paid_full,paid_partial")}`
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || "Export failed");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `payouts-report-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      showToast("Payouts report downloaded", "success");
+    } catch (e: any) {
+      showToast(e.message || "Export failed", "error");
+    } finally {
+      setExportingPaidCsv(false);
     }
   };
 
@@ -215,6 +289,145 @@ export function AdminWithdrawalsPage({
           </Link>
         </div>
       </div>
+
+      {/* Payout Summary Report */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="rounded-2xl border border-white/10 bg-white/[0.02] mb-8 overflow-hidden"
+      >
+        <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <FileSpreadsheet className="w-5 h-5 text-emerald-400" />
+            <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-400">
+              Payout Report
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={handleExportPaidCsv}
+            disabled={exportingPaidCsv}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold hover:bg-emerald-500/20 disabled:opacity-40 transition-colors"
+          >
+            {exportingPaidCsv ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Download className="w-3.5 h-3.5" />
+            )}
+            Export Paid CSV
+          </button>
+        </div>
+        {summaryLoading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="w-6 h-6 text-zinc-500 animate-spin" />
+          </div>
+        ) : summary ? (
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <TrendingUp className="w-4 h-4 text-emerald-400" />
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Total Earned</p>
+                </div>
+                <p className="text-xl font-black text-emerald-400 tabular-nums">
+                  {fmtKes(summary.total_earnings_credited)}
+                </p>
+                <p className="text-[10px] text-zinc-600 mt-1">KES credited to seekers</p>
+              </div>
+
+              <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <TrendingDown className="w-4 h-4 text-red-400" />
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Total Paid Out</p>
+                </div>
+                <p className="text-xl font-black text-red-400 tabular-nums">
+                  {fmtKes(summary.total_paid_out)}
+                </p>
+                <p className="text-[10px] text-zinc-600 mt-1">KES via M-Pesa/bank</p>
+              </div>
+
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Wallet className="w-4 h-4 text-amber-400" />
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Outstanding</p>
+                </div>
+                <p className="text-xl font-black text-amber-400 tabular-nums">
+                  {fmtKes(summary.outstanding_balance)}
+                </p>
+                <p className="text-[10px] text-zinc-600 mt-1">
+                  Earned {summary.total_adjustments !== 0 ? `+ adjustments (${fmtKes(summary.total_adjustments)}) ` : ""}minus paid out
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Clock className="w-4 h-4 text-blue-400" />
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Pending</p>
+                </div>
+                <p className="text-xl font-black text-blue-400 tabular-nums">
+                  {fmtKes(summary.pending_amount)}
+                </p>
+                <p className="text-[10px] text-zinc-600 mt-1">{summary.pending_count} request{summary.pending_count !== 1 ? "s" : ""} awaiting payout</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-center">
+                <p className="text-lg font-black tabular-nums">{summary.total_requests}</p>
+                <p className="text-[10px] font-bold uppercase text-zinc-500 mt-0.5">Total Requests</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-center">
+                <div className="flex items-center justify-center gap-1.5">
+                  <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                  <p className="text-lg font-black text-emerald-400 tabular-nums">{summary.paid_full_count}</p>
+                </div>
+                <p className="text-[10px] font-bold uppercase text-zinc-500 mt-0.5">Paid Full</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-center">
+                <p className="text-lg font-black text-blue-400 tabular-nums">{summary.paid_partial_count}</p>
+                <p className="text-[10px] font-bold uppercase text-zinc-500 mt-0.5">Paid Partial</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-center">
+                <p className="text-lg font-black text-zinc-500 tabular-nums">{summary.rejected_count}</p>
+                <p className="text-[10px] font-bold uppercase text-zinc-500 mt-0.5">Rejected</p>
+              </div>
+            </div>
+
+            {summary.total_paid_out > 0 && summary.total_earnings_credited > 0 && (
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="flex items-center justify-between text-xs mb-2">
+                  <span className="text-zinc-400">Payout ratio (paid out / earned)</span>
+                  <span className={cn(
+                    "font-bold",
+                    (summary.total_paid_out / summary.total_earnings_credited) > 0.8
+                      ? "text-red-400"
+                      : (summary.total_paid_out / summary.total_earnings_credited) > 0.5
+                        ? "text-amber-400"
+                        : "text-emerald-400"
+                  )}>
+                    {((summary.total_paid_out / summary.total_earnings_credited) * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-all",
+                      (summary.total_paid_out / summary.total_earnings_credited) > 0.8
+                        ? "bg-red-500"
+                        : (summary.total_paid_out / summary.total_earnings_credited) > 0.5
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                    )}
+                    style={{ width: `${Math.min(100, (summary.total_paid_out / summary.total_earnings_credited) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-center text-zinc-600 py-6 text-sm">Could not load payout summary.</p>
+        )}
+      </motion.div>
 
       {loading ? (
         <div className="flex justify-center py-20">

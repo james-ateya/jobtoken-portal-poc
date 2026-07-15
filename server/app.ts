@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { normalizeEmail } from "./auth-otp.js";
+import { normalizeEmail, generateSixDigitOtp, hashAuthOtp } from "./auth-otp.js";
 import { sendSeekerWelcomeEmail } from "./seeker-welcome-email.js";
 import { sendPromptGradingEmail } from "./prompt-grading-email.js";
 import { sendPromptSubmissionEmail } from "./prompt-submission-email.js";
@@ -2060,6 +2060,11 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       .filter((email) => email.length > 0);
     const blacklistByEmail = await loadBlacklistForEmails(supabaseAdmin, pageEmails);
 
+    let earningsByUser = new Map<string, number>();
+    try {
+      earningsByUser = await loadEarningsBalancesMap(supabaseAdmin);
+    } catch { /* view may not exist yet */ }
+
     if (userIds.length > 0) {
       const creditTypes = ["topup", "token_gift", "earnings_token_redemption", "coupon_bonus"];
       const wallets = await fetchRowsInIdBatches<{ id: string; user_id: string; token_balance: unknown }>(
@@ -2113,6 +2118,7 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       return {
         ...profile,
         token_balance: tokenBalance,
+        earnings_balance_kes: earningsByUser.get(profile.id as string) ?? 0,
         days_since_registration: daysSinceRegistration,
         has_ever_topped_up: hasEverToppedUp,
         needs_topup_attention:
@@ -2510,6 +2516,11 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
 
     const blacklist = await getBlacklistForEmail(supabaseAdmin, profile.email);
 
+    let earnings_balance_kes = 0;
+    try {
+      earnings_balance_kes = await getEarningsBalanceKes(supabaseAdmin, userId);
+    } catch { /* view may not exist yet */ }
+
     res.json({
       profile,
       wallet: wallet ?? null,
@@ -2521,6 +2532,7 @@ app.get("/api/admin/user/:userId", requireAdminMw, async (req, res) => {
             created_at: blacklist.created_at,
           }
         : null,
+      earnings_balance_kes,
       summary: {
         total_topup_kes,
         application_tokens_spent,
@@ -2750,6 +2762,182 @@ app.post("/api/admin/users/delete", requireAdminMw, async (req, res) => {
   } catch (error: any) {
     console.error("admin delete user:", error);
     res.status(500).json({ error: error.message || "Delete failed" });
+  }
+});
+
+// ── Earnings reset OTP (send code to admin's email) ──
+app.post("/api/admin/users/:userId/earnings-reset-otp", requireAdminMw, async (req, res) => {
+  const adminUserId = (req as AuthedRequest).authUserId;
+  const { userId } = req.params;
+
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  try {
+    const { data: adminProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email, full_name")
+      .eq("id", adminUserId)
+      .single();
+    if (!adminProfile?.email) return res.status(400).json({ error: "Admin email not found" });
+
+    const { data: targetProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email, full_name")
+      .eq("id", userId)
+      .single();
+    if (!targetProfile) return res.status(404).json({ error: "Target user not found" });
+
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
+    if (balance <= 0) return res.status(400).json({ error: "User has no earnings to reset" });
+
+    const adminEmailNorm = normalizeEmail(adminProfile.email);
+
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { count: recentCount } = await supabaseAdmin
+      .from("admin_action_otps")
+      .select("*", { count: "exact", head: true })
+      .eq("admin_user_id", adminUserId)
+      .eq("action", "earnings_reset")
+      .gte("created_at", since);
+    if ((recentCount ?? 0) >= 5) {
+      return res.status(429).json({ error: "Too many OTP requests. Try again later." });
+    }
+
+    const otp = generateSixDigitOtp();
+    const otpHash = hashAuthOtp(otp, adminEmailNorm, "earnings_reset");
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    await supabaseAdmin.from("admin_action_otps").insert({
+      admin_user_id: adminUserId,
+      target_user_id: userId,
+      action: "earnings_reset",
+      email_normalized: adminEmailNorm,
+      otp_hash: otpHash,
+      metadata: { balance_kes: balance, target_name: targetProfile.full_name },
+      expires_at: expiresAt,
+    });
+
+    await sendMail({
+      to: adminProfile.email,
+      subject: "Earnings Reset Verification Code",
+      html: `
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#f8f9fa;border-radius:12px">
+          <h2 style="color:#111;margin:0 0 8px">Earnings Reset OTP</h2>
+          <p style="color:#555;font-size:14px;margin:0 0 16px">
+            You requested to reset earnings for <strong>${targetProfile.full_name || targetProfile.email}</strong>.
+          </p>
+          <p style="color:#555;font-size:14px;margin:0 0 16px">
+            Current balance: <strong>KES ${balance.toLocaleString("en-KE", { minimumFractionDigits: 2 })}</strong>
+          </p>
+          <div style="background:#111;color:#fff;font-size:32px;font-weight:bold;text-align:center;padding:16px;border-radius:8px;letter-spacing:8px;margin:0 0 16px">
+            ${otp}
+          </div>
+          <p style="color:#888;font-size:12px;margin:0">
+            This code expires in 15 minutes. If you did not request this, ignore this email.
+          </p>
+        </div>
+      `,
+    });
+
+    res.json({ sent: true, email: adminProfile.email.replace(/(.{2}).*(@.*)/, "$1***$2") });
+  } catch (error: any) {
+    console.error("earnings-reset-otp:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Execute earnings reset with OTP verification ──
+app.post("/api/admin/users/:userId/earnings-reset", requireAdminMw, async (req, res) => {
+  const adminUserId = (req as AuthedRequest).authUserId;
+  const { userId } = req.params;
+  const body = parseJsonBody(req);
+  const otpDigits = asNonEmptyString(body.otp);
+  const reason = asNonEmptyString(body.reason);
+
+  if (!userId) return res.status(400).json({ error: "userId required" });
+  if (!otpDigits || otpDigits.length !== 6) return res.status(400).json({ error: "Valid 6-digit OTP required" });
+  if (!reason) return res.status(400).json({ error: "Reason is required for audit trail" });
+
+  try {
+    const { data: adminProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email, full_name")
+      .eq("id", adminUserId)
+      .single();
+    if (!adminProfile?.email) return res.status(400).json({ error: "Admin email not found" });
+
+    const { data: targetProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("email, full_name")
+      .eq("id", userId)
+      .single();
+    if (!targetProfile) return res.status(404).json({ error: "Target user not found" });
+
+    const adminEmailNorm = normalizeEmail(adminProfile.email);
+
+    const { data: otpRows } = await supabaseAdmin
+      .from("admin_action_otps")
+      .select("*")
+      .eq("admin_user_id", adminUserId)
+      .eq("target_user_id", userId)
+      .eq("action", "earnings_reset")
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    const otpRow = otpRows?.[0] as any;
+    if (!otpRow) return res.status(400).json({ error: "No valid OTP found. Request a new code." });
+
+    if ((otpRow.attempt_count ?? 0) >= 5) {
+      return res.status(429).json({ error: "Too many attempts. Request a new code." });
+    }
+
+    await supabaseAdmin
+      .from("admin_action_otps")
+      .update({ attempt_count: (otpRow.attempt_count ?? 0) + 1 })
+      .eq("id", otpRow.id);
+
+    const expectedHash = otpRow.otp_hash;
+    const actualHash = hashAuthOtp(otpDigits, adminEmailNorm, "earnings_reset");
+    const a = Buffer.from(expectedHash, "hex");
+    const b = Buffer.from(actualHash, "hex");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      return res.status(400).json({ error: "Invalid OTP code" });
+    }
+
+    await supabaseAdmin.from("admin_action_otps").delete().eq("id", otpRow.id);
+
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
+    if (balance <= 0) return res.status(400).json({ error: "User has no earnings to reset" });
+
+    const { error: insertErr } = await supabaseAdmin.from("earnings_ledger").insert({
+      user_id: userId,
+      amount_kes: -balance,
+      entry_type: "adjustment",
+      reference_type: "admin_earnings_reset",
+      metadata: {
+        reason,
+        admin_user_id: adminUserId,
+        admin_email: adminProfile.email,
+        admin_name: adminProfile.full_name,
+        original_balance: balance,
+        reset_at: new Date().toISOString(),
+      },
+    });
+    if (insertErr) throw insertErr;
+
+    const newBalance = await getEarningsBalanceKes(supabaseAdmin, userId);
+
+    res.json({
+      success: true,
+      previous_balance: balance,
+      new_balance: newBalance,
+      reason,
+      target_user: targetProfile.full_name || targetProfile.email,
+    });
+  } catch (error: any) {
+    console.error("earnings-reset:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -4007,6 +4195,76 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
       page,
       pageSize,
       totalPages: Math.ceil(totalN / pageSize) || 0,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (_req, res) => {
+  try {
+    const { data: creditRows } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select("amount_kes")
+      .eq("entry_type", "reward_credit");
+    const totalEarningsCredited = (creditRows ?? []).reduce(
+      (sum, r) => sum + Number(r.amount_kes ?? 0), 0
+    );
+
+    const { data: payoutRows } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select("amount_kes")
+      .eq("entry_type", "withdrawal_payout");
+    const totalPaidOut = (payoutRows ?? []).reduce(
+      (sum, r) => sum + Math.abs(Number(r.amount_kes ?? 0)), 0
+    );
+
+    const { data: adjustmentRows } = await supabaseAdmin
+      .from("earnings_ledger")
+      .select("amount_kes")
+      .in("entry_type", ["adjustment", "reversal"]);
+    const totalAdjustments = (adjustmentRows ?? []).reduce(
+      (sum, r) => sum + Number(r.amount_kes ?? 0), 0
+    );
+
+    const { data: allWr } = await supabaseAdmin
+      .from("withdrawal_requests")
+      .select("amount_kes_requested, amount_paid_kes, status");
+
+    let totalRequested = 0;
+    let totalSettled = 0;
+    let pendingCount = 0;
+    let pendingAmount = 0;
+    let paidFullCount = 0;
+    let paidPartialCount = 0;
+    let rejectedCount = 0;
+
+    for (const r of allWr ?? []) {
+      const req = Number(r.amount_kes_requested ?? 0);
+      const paid = Number(r.amount_paid_kes ?? 0);
+      totalRequested += req;
+      totalSettled += paid;
+      if (r.status === "pending") { pendingCount++; pendingAmount += req; }
+      else if (r.status === "paid_full") paidFullCount++;
+      else if (r.status === "paid_partial") { paidPartialCount++; pendingAmount += (req - paid); }
+      else if (r.status === "rejected") rejectedCount++;
+    }
+
+    const outstandingBalance = Math.round((totalEarningsCredited + totalAdjustments - totalPaidOut) * 100) / 100;
+
+    res.json({
+      total_earnings_credited: Math.round(totalEarningsCredited * 100) / 100,
+      total_adjustments: Math.round(totalAdjustments * 100) / 100,
+      total_requested: Math.round(totalRequested * 100) / 100,
+      total_paid_out: Math.round(totalPaidOut * 100) / 100,
+      total_settled_on_requests: Math.round(totalSettled * 100) / 100,
+      outstanding_balance: outstandingBalance,
+      pending_count: pendingCount,
+      pending_amount: Math.round(pendingAmount * 100) / 100,
+      paid_full_count: paidFullCount,
+      paid_partial_count: paidPartialCount,
+      rejected_count: rejectedCount,
+      total_requests: (allWr ?? []).length,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

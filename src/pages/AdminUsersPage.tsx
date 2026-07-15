@@ -19,6 +19,9 @@ import {
   Pencil,
   ShieldBan,
   Search,
+  RotateCcw,
+  TrendingUp,
+  KeyRound,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
@@ -34,6 +37,7 @@ interface ListedUser {
   employer_approval_status?: string | null;
   employer_approved_at?: string | null;
   token_balance?: number;
+  earnings_balance_kes?: number;
   days_since_registration?: number;
   has_ever_topped_up?: boolean;
   needs_topup_attention?: boolean;
@@ -154,6 +158,14 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
 
+  const [resetModal, setResetModal] = useState(false);
+  const [resetStep, setResetStep] = useState<"reason" | "otp">("reason");
+  const [resetReason, setResetReason] = useState("");
+  const [resetOtp, setResetOtp] = useState("");
+  const [resetOtpSending, setResetOtpSending] = useState(false);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+  const [resetMaskedEmail, setResetMaskedEmail] = useState("");
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const next = searchInput.trim().length >= 2 ? searchInput.trim() : "";
@@ -213,6 +225,9 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
     fetchUsers();
   }, [roleTab, page, pageSize, searchQuery]);
 
+  const fmtKes = (n: number) =>
+    n.toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
   const renderUserCells = (u: ListedUser) => (
     <>
       <td className="px-6 py-4">
@@ -227,6 +242,13 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
       <td className="px-6 py-4 text-sm text-zinc-300">{u.email}</td>
       <td className="px-6 py-4 tabular-nums text-sm text-white font-semibold">
         {u.token_balance ?? 0}
+      </td>
+      <td className="px-6 py-4 tabular-nums text-sm font-semibold">
+        {(u.earnings_balance_kes ?? 0) > 0 ? (
+          <span className="text-emerald-400">{fmtKes(u.earnings_balance_kes!)}</span>
+        ) : (
+          <span className="text-zinc-600">0.00</span>
+        )}
       </td>
       <td className="px-6 py-4 text-sm text-zinc-400 tabular-nums">
         {u.days_since_registration ?? 0}
@@ -670,6 +692,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Name</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Email</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Tokens</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Earnings (KES)</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Member days</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Status</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right">Actions</th>
@@ -678,7 +701,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
               <tbody>
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-16 text-center text-zinc-500">
+                    <td colSpan={7} className="px-6 py-16 text-center text-zinc-500">
                       {searchQuery ? "No users match your search." : "No users in this list."}
                     </td>
                   </tr>
@@ -994,6 +1017,46 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                     </div>
                     ) : null}
 
+                    {profile.role === "seeker" ? (
+                    <div className="p-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/[0.03]">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-widest">
+                          <TrendingUp className="w-4 h-4 text-emerald-400" />
+                          Earnings Balance
+                        </div>
+                        {Number(detailPayload?.earnings_balance_kes ?? 0) > 0 ? (
+                          <button
+                            type="button"
+                            disabled={!!actionBusy}
+                            onClick={() => {
+                              setResetModal(true);
+                              setResetStep("reason");
+                              setResetReason("");
+                              setResetOtp("");
+                              setResetMaskedEmail("");
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold hover:bg-red-500/20 transition-colors"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            Reset Earnings
+                          </button>
+                        ) : null}
+                      </div>
+                      <p className="text-2xl font-bold tabular-nums">
+                        {Number(detailPayload?.earnings_balance_kes ?? 0) > 0 ? (
+                          <span className="text-emerald-400">
+                            KES {fmtKes(Number(detailPayload?.earnings_balance_kes ?? 0))}
+                          </span>
+                        ) : (
+                          <span className="text-zinc-600">KES 0.00</span>
+                        )}
+                      </p>
+                      <p className="text-[11px] text-zinc-500 mt-1">
+                        Net balance from prompt rewards, adjustments, and withdrawals
+                      </p>
+                    </div>
+                    ) : null}
+
                     {profile.role !== "admin" ? (
                     <div>
                       <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-widest mb-2">
@@ -1301,6 +1364,180 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                 )}
                 Create administrator
               </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {resetModal && detailId && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => setResetModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              className="w-full max-w-md rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl p-6 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <RotateCcw className="w-5 h-5 text-red-400" />
+                  Reset Earnings
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setResetModal(false)}
+                  className="p-2 rounded-full hover:bg-white/10 text-zinc-400"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-200/90">
+                <p className="font-semibold text-amber-300">This action is irreversible</p>
+                <p className="text-xs mt-1">
+                  A contra-entry of{" "}
+                  <strong>KES {fmtKes(Number(detailPayload?.earnings_balance_kes ?? 0))}</strong>{" "}
+                  will be posted to zero out{" "}
+                  <strong>{String(profile?.full_name || profile?.email || "this user")}</strong>'s earnings.
+                </p>
+              </div>
+
+              {resetStep === "reason" ? (
+                <>
+                  <label className="block space-y-2">
+                    <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+                      Reason for reset (required — stored in audit trail)
+                    </span>
+                    <textarea
+                      value={resetReason}
+                      onChange={(e) => setResetReason(e.target.value)}
+                      rows={3}
+                      placeholder="e.g. Duplicate earnings, test account cleanup, policy violation…"
+                      className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2.5 text-sm text-white placeholder:text-zinc-600 resize-y min-h-[80px]"
+                    />
+                  </label>
+                  <div className="flex flex-wrap gap-3 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setResetModal(false)}
+                      className="px-4 py-2.5 rounded-xl border border-white/15 text-sm font-bold text-zinc-400 hover:bg-white/5"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!resetReason.trim() || resetOtpSending}
+                      onClick={async () => {
+                        setResetOtpSending(true);
+                        try {
+                          const res = await apiFetch(
+                            `/api/admin/users/${detailId}/earnings-reset-otp`,
+                            { method: "POST" }
+                          );
+                          const j = await res.json().catch(() => ({}));
+                          if (!res.ok) throw new Error(j.error || "Failed to send OTP");
+                          setResetMaskedEmail(j.email || "");
+                          setResetStep("otp");
+                          showToast("Verification code sent to your email", "success");
+                        } catch (e: any) {
+                          showToast(e.message || "OTP request failed", "error");
+                        } finally {
+                          setResetOtpSending(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-400 text-sm font-bold hover:bg-red-500/25 disabled:opacity-50"
+                    >
+                      {resetOtpSending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <KeyRound className="w-4 h-4" />
+                      )}
+                      Send verification code
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-zinc-400">
+                    A 6-digit code has been sent to <strong className="text-white">{resetMaskedEmail}</strong>.
+                    Enter it below to confirm the reset.
+                  </p>
+                  <label className="block space-y-2">
+                    <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">
+                      Verification code
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={resetOtp}
+                      onChange={(e) => setResetOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      placeholder="000000"
+                      className="w-full rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-center text-2xl font-bold tracking-[0.3em] text-white placeholder:text-zinc-700"
+                    />
+                  </label>
+                  <p className="text-xs text-zinc-600">
+                    Reason: <span className="text-zinc-400">{resetReason}</span>
+                  </p>
+                  <div className="flex flex-wrap gap-3 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetStep("reason");
+                        setResetOtp("");
+                      }}
+                      className="px-4 py-2.5 rounded-xl border border-white/15 text-sm font-bold text-zinc-400 hover:bg-white/5"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      disabled={resetOtp.length !== 6 || resetSubmitting}
+                      onClick={async () => {
+                        setResetSubmitting(true);
+                        try {
+                          const res = await apiFetch(
+                            `/api/admin/users/${detailId}/earnings-reset`,
+                            {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ otp: resetOtp, reason: resetReason.trim() }),
+                            }
+                          );
+                          const j = await res.json().catch(() => ({}));
+                          if (!res.ok) throw new Error(j.error || "Reset failed");
+                          showToast(
+                            `Earnings reset: KES ${fmtKes(j.previous_balance ?? 0)} → KES ${fmtKes(j.new_balance ?? 0)}`,
+                            "success"
+                          );
+                          setResetModal(false);
+                          await openDetail(detailId);
+                          await fetchUsers();
+                        } catch (e: any) {
+                          showToast(e.message || "Reset failed", "error");
+                        } finally {
+                          setResetSubmitting(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500 text-white text-sm font-bold hover:bg-red-400 disabled:opacity-50"
+                    >
+                      {resetSubmitting ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RotateCcw className="w-4 h-4" />
+                      )}
+                      Confirm reset
+                    </button>
+                  </div>
+                </>
+              )}
             </motion.div>
           </motion.div>
         )}
