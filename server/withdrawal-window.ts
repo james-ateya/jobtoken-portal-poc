@@ -1,4 +1,4 @@
-/** Withdrawal requests open on the first Tuesday of each month from August 2026. */
+/** Withdrawals are open anytime once the minimum balance is met. */
 export const WITHDRAWAL_SCHEDULE_START_UTC = new Date(Date.UTC(2026, 7, 1));
 
 export function getFirstTuesdayUtc(year: number, monthIndex: number): Date {
@@ -16,38 +16,16 @@ function sameUtcDay(a: Date, b: Date): boolean {
   );
 }
 
-export function isWithdrawalWindowNow(now = new Date()): boolean {
-  if (now < WITHDRAWAL_SCHEDULE_START_UTC) return false;
-  const firstTuesday = getFirstTuesdayUtc(now.getUTCFullYear(), now.getUTCMonth());
-  return sameUtcDay(now, firstTuesday);
+export function isWithdrawalWindowNow(_now = new Date()): boolean {
+  return true;
 }
 
 export function getNextWithdrawalWindowDate(now = new Date()): Date {
-  if (now < WITHDRAWAL_SCHEDULE_START_UTC) {
-    return getFirstTuesdayUtc(2026, 7);
-  }
-
-  const firstTuesdayThisMonth = getFirstTuesdayUtc(
-    now.getUTCFullYear(),
-    now.getUTCMonth()
-  );
-
-  if (sameUtcDay(now, firstTuesdayThisMonth)) {
-    return firstTuesdayThisMonth;
-  }
-
-  if (now.getTime() < firstTuesdayThisMonth.getTime()) {
-    return firstTuesdayThisMonth;
-  }
-
-  const nextMonthIndex = now.getUTCMonth() + 1;
-  const year = nextMonthIndex > 11 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
-  const monthIndex = nextMonthIndex % 12;
-  return getFirstTuesdayUtc(year, monthIndex);
+  return now;
 }
 
 export function getWithdrawalScheduleDescription(): string {
-  return "First Tuesday of each month (from August 2026)";
+  return "Withdrawals are available anytime once you reach the minimum balance.";
 }
 
 /** Minimum KES balance that may be requested per withdrawal (default 1,500). */

@@ -78,9 +78,6 @@ export function SeekerEarningsPage({
   const [submitting, setSubmitting] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [amountInput, setAmountInput] = useState("");
-  const [nextWithdrawalWindow, setNextWithdrawalWindow] = useState<string | null>(null);
-  const [withdrawalWindowOpen, setWithdrawalWindowOpen] = useState(false);
-  const [withdrawalSchedule, setWithdrawalSchedule] = useState<string | null>(null);
   const [minWithdrawalKes, setMinWithdrawalKes] = useState(1500);
   const [canRequestWithdrawal, setCanRequestWithdrawal] = useState(false);
   const [kesPerToken, setKesPerToken] = useState(20);
@@ -123,9 +120,6 @@ export function SeekerEarningsPage({
       }
       const sumJson = await sumRes.json();
       setBalanceKes(Number(sumJson.balance_kes ?? 0));
-      setNextWithdrawalWindow(sumJson.next_withdrawal_window ?? null);
-      setWithdrawalWindowOpen(Boolean(sumJson.withdrawal_window_open));
-      setWithdrawalSchedule(sumJson.withdrawal_schedule ?? null);
       setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 1500));
       setCanRequestWithdrawal(Boolean(sumJson.can_request_withdrawal));
 
@@ -314,11 +308,9 @@ export function SeekerEarningsPage({
     canRequestWithdrawal && !pendingWithdrawal;
   const withdrawalBlockedReason = pendingWithdrawal
     ? null
-    : !withdrawalWindowOpen
-      ? "window_closed"
-      : balance < minWithdrawalKes
-        ? "low_balance"
-        : null;
+    : balance < minWithdrawalKes
+      ? "low_balance"
+      : null;
 
   const downloadStatementCsv = async () => {
     setExportingCsv(true);
@@ -406,35 +398,14 @@ export function SeekerEarningsPage({
                 <div>
                   <h2 className="font-semibold text-white">Request a withdrawal</h2>
                   <p className="text-sm text-zinc-500 mt-1">
-                    {withdrawalSchedule ||
-                      "Withdrawal requests open on the first Tuesday of each month (from August 2026)."}
-                    {nextWithdrawalWindow ? (
-                      <>
-                        {" "}
-                        Next window:{" "}
-                        <span className="text-zinc-300">
-                          {new Date(`${nextWithdrawalWindow}T00:00:00Z`).toLocaleDateString("en-KE", {
-                            year: "numeric",
-                            month: "long",
-                            day: "numeric",
-                            timeZone: "UTC",
-                          })}
-                        </span>
-                        .
-                      </>
-                    ) : null}
+                    Withdraw your earnings anytime once you reach the minimum balance.
                   </p>
-                  {withdrawalWindowOpen ? (
-                    <p className="text-sm text-emerald-400 mt-2">
-                      The withdrawal window is open today.
-                    </p>
-                  ) : null}
                   <p className="text-sm text-zinc-400 mt-2">
                     Minimum withdrawal:{" "}
                     <span className="text-white font-semibold tabular-nums">
                       Ksh {minWithdrawalKes.toLocaleString("en-KE")}
                     </span>
-                    . This helps batch payouts and gives the team time to prepare funds.
+                    . The team will process your request as soon as possible.
                   </p>
                 </div>
               </div>
@@ -447,12 +418,7 @@ export function SeekerEarningsPage({
                 </div>
               ) : !withdrawalAllowed ? (
                 <div className="rounded-xl bg-zinc-950/80 border border-zinc-700 px-4 py-3 text-sm text-zinc-300">
-                  {withdrawalBlockedReason === "window_closed" ? (
-                    <>
-                      Withdrawal requests are not open today. Check back on the next window date
-                      above.
-                    </>
-                  ) : withdrawalBlockedReason === "low_balance" ? (
+                  {withdrawalBlockedReason === "low_balance" ? (
                     <>
                       You need at least{" "}
                       <strong>Ksh {minWithdrawalKes.toLocaleString("en-KE")}</strong> in earnings to
@@ -581,7 +547,7 @@ export function SeekerEarningsPage({
                       <h2 className="font-semibold text-white">Redeem earnings for tokens</h2>
                       <p className="text-sm text-zinc-500 mt-1">
                         Convert part of your KES balance into wallet tokens at {kesPerToken} KES per
-                        token. You do not need to wait for the monthly withdrawal window.
+                        token.
                       </p>
                     </div>
                   </div>

@@ -3456,15 +3456,12 @@ app.get("/api/earnings/summary", requireSeekerMw, async (req, res) => {
 
   try {
     const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
-    const nextWindow = getNextWithdrawalWindowDate();
     res.json({
       balance_kes: balance,
-      withdrawal_window_open: isWithdrawalWindowNow(),
-      next_withdrawal_window: formatWithdrawalWindowDate(nextWindow),
+      withdrawal_window_open: true,
       withdrawal_schedule: getWithdrawalScheduleDescription(),
       minimum_withdrawal_kes: getMinimumWithdrawalKes(),
-      can_request_withdrawal:
-        isWithdrawalWindowNow() && balance >= getMinimumWithdrawalKes(),
+      can_request_withdrawal: balance >= getMinimumWithdrawalKes(),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3638,13 +3635,6 @@ app.post("/api/earnings/withdrawal-otp", requireSeekerMw, async (req, res) => {
     return res.status(400).json({ error: "Enter a valid Safaricom phone number (07XX or 01XX)" });
   }
 
-  if (!isWithdrawalWindowNow()) {
-    const nextWindow = formatWithdrawalWindowDate(getNextWithdrawalWindowDate());
-    return res.status(400).json({
-      error: `Withdrawal requests open only on the first Tuesday of each month (from August 2026). Next window: ${nextWindow}.`,
-    });
-  }
-
   const minimumWithdrawalKes = getMinimumWithdrawalKes();
   if (amount < minimumWithdrawalKes) {
     return res.status(400).json({
@@ -3706,13 +3696,6 @@ app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) =
 
   if (!otpCode) {
     return res.status(400).json({ error: "OTP verification code is required" });
-  }
-
-  if (!isWithdrawalWindowNow()) {
-    const nextWindow = formatWithdrawalWindowDate(getNextWithdrawalWindowDate());
-    return res.status(400).json({
-      error: `Withdrawal requests open only on the first Tuesday of each month (from August 2026). Next window: ${nextWindow}.`,
-    });
   }
 
   const minimumWithdrawalKes = getMinimumWithdrawalKes();
