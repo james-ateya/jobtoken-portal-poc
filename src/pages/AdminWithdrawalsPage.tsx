@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "motion/react";
-import { Loader2, Banknote, ArrowLeft } from "lucide-react";
+import { Loader2, Banknote, ArrowLeft, Download, Phone } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
 
@@ -14,8 +14,9 @@ type WithdrawalReq = {
   amount_paid_kes: number | string;
   payout_reference: string | null;
   admin_note: string | null;
+  payout_phone: string | null;
   created_at: string;
-  profiles?: { email?: string; full_name?: string } | null;
+  profiles?: { email?: string; full_name?: string; phone?: string } | null;
 };
 
 function num(v: number | string | undefined): number {
@@ -40,14 +41,17 @@ export function AdminWithdrawalsPage({
   const [amountById, setAmountById] = useState<Record<string, string>>({});
   const [refById, setRefById] = useState<Record<string, string>>({});
   const [noteById, setNoteById] = useState<Record<string, string>>({});
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [exportingCsv, setExportingCsv] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const openQ = `status=${encodeURIComponent("pending,paid_partial")}&page=1&pageSize=100`;
+      const browseStatus = statusFilter !== "all" ? `&status=${encodeURIComponent(statusFilter)}` : "";
       const [openRes, pageRes] = await Promise.all([
         apiFetch(`/api/admin/withdrawal-requests?${openQ}`),
-        apiFetch(`/api/admin/withdrawal-requests?page=${page}&pageSize=${pageSize}`),
+        apiFetch(`/api/admin/withdrawal-requests?page=${page}&pageSize=${pageSize}${browseStatus}`),
       ]);
       const jo = await openRes.json().catch(() => ({}));
       const jp = await pageRes.json().catch(() => ({}));
@@ -61,7 +65,7 @@ export function AdminWithdrawalsPage({
     } finally {
       setLoading(false);
     }
-  }, [page, showToast]);
+  }, [page, statusFilter, showToast]);
 
   useEffect(() => {
     load();
@@ -110,6 +114,38 @@ export function AdminWithdrawalsPage({
     }
   };
 
+  const formatPhone = (r: WithdrawalReq): string => {
+    const phone = r.payout_phone || r.profiles?.phone || "";
+    if (phone.startsWith("254") && phone.length === 12) return `0${phone.slice(3)}`;
+    return phone;
+  };
+
+  const handleExportCsv = async () => {
+    setExportingCsv(true);
+    try {
+      const statusQ = statusFilter !== "all" ? `?status=${encodeURIComponent(statusFilter)}` : "";
+      const res = await apiFetch(`/api/admin/withdrawal-requests/export-csv${statusQ}`);
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || "Export failed");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `withdrawal-requests-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      showToast("CSV downloaded", "success");
+    } catch (e: any) {
+      showToast(e.message || "Export failed", "error");
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
   return (
     <main className="max-w-5xl mx-auto px-6 py-12 text-white">
       <div className="flex flex-wrap items-center justify-between gap-4 mb-10">
@@ -125,6 +161,30 @@ export function AdminWithdrawalsPage({
           </div>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
+          <select
+            value={statusFilter}
+            onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+            className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+          >
+            <option value="all" className="bg-zinc-800 text-white">All statuses</option>
+            <option value="pending" className="bg-zinc-800 text-white">Pending</option>
+            <option value="paid_partial" className="bg-zinc-800 text-white">Paid partial</option>
+            <option value="paid_full" className="bg-zinc-800 text-white">Paid full</option>
+            <option value="rejected" className="bg-zinc-800 text-white">Rejected</option>
+          </select>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={exportingCsv}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-sm font-bold hover:bg-white/10 disabled:opacity-40"
+          >
+            {exportingCsv ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            Export CSV
+          </button>
           <div className="flex items-center gap-2 text-sm text-zinc-500">
             <button
               type="button"
@@ -194,6 +254,12 @@ export function AdminWithdrawalsPage({
                             ({r.profiles?.email || r.user_id})
                           </span>
                         </p>
+                        {formatPhone(r) && (
+                          <p className="text-sm text-emerald-400 mt-1 flex items-center gap-1.5">
+                            <Phone className="w-3.5 h-3.5" />
+                            M-Pesa: {formatPhone(r)}
+                          </p>
+                        )}
                         <p className="text-xs text-zinc-500 mt-1">
                           Period {r.period_month} · Requested {requested.toFixed(2)} KES · Paid so far{" "}
                           {paid.toFixed(2)} · Remaining {remaining.toFixed(2)}
@@ -288,6 +354,7 @@ export function AdminWithdrawalsPage({
                 <tr className="border-b border-white/10 text-left text-zinc-500">
                   <th className="p-3 font-medium">Created</th>
                   <th className="p-3 font-medium">User</th>
+                  <th className="p-3 font-medium">Phone (M-Pesa)</th>
                   <th className="p-3 font-medium">Requested</th>
                   <th className="p-3 font-medium">Paid</th>
                   <th className="p-3 font-medium">Status</th>
@@ -300,6 +367,7 @@ export function AdminWithdrawalsPage({
                       {new Date(r.created_at).toLocaleString()}
                     </td>
                     <td className="p-3">{r.profiles?.email ?? r.user_id}</td>
+                    <td className="p-3 text-zinc-300 whitespace-nowrap">{formatPhone(r) || "—"}</td>
                     <td className="p-3 tabular-nums">{num(r.amount_kes_requested).toFixed(2)}</td>
                     <td className="p-3 tabular-nums">{num(r.amount_paid_kes).toFixed(2)}</td>
                     <td className="p-3">{r.status}</td>

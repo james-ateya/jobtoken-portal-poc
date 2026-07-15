@@ -91,6 +91,12 @@ import {
 } from "./coupon.js";
 import { sendCouponBonusEmail } from "./coupon-bonus-email.js";
 import { sendTicketConfirmationEmail, sendTicketReplyEmail } from "./support-ticket-email.js";
+import {
+  issueWithdrawalOtp,
+  verifyWithdrawalOtp,
+  isValidSafaricomPhone,
+  normalizeSafaricomPhone,
+} from "./withdrawal-otp.js";
 
 const { loadedFiles } = loadProjectEnv();
 if (process.env.NODE_ENV !== "production" && loadedFiles.length) {
@@ -3429,14 +3435,19 @@ app.post("/api/earnings/gift-tokens", requireSeekerMw, async (req, res) => {
   }
 });
 
-app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) => {
+app.post("/api/earnings/withdrawal-otp", requireSeekerMw, async (req, res) => {
   const body = parseJsonBody(req);
   const userId = (req as AuthedRequest).authUserId;
   const amountRaw = body.amountKesRequested ?? body.amount_kes_requested;
   const amount = typeof amountRaw === "number" ? amountRaw : parseFloat(String(amountRaw ?? ""));
+  const phone = String(body.phone ?? "").trim();
 
   if (!Number.isFinite(amount) || amount <= 0) {
     return res.status(400).json({ error: "Positive amountKesRequested required" });
+  }
+
+  if (!phone || !isValidSafaricomPhone(phone)) {
+    return res.status(400).json({ error: "Enter a valid Safaricom phone number (07XX or 01XX)" });
   }
 
   if (!isWithdrawalWindowNow()) {
@@ -3466,6 +3477,86 @@ app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) =
       });
     }
 
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("email")
+      .eq("id", userId)
+      .single();
+    if (!profile?.email) {
+      return res.status(400).json({ error: "Could not find your email address" });
+    }
+
+    await issueWithdrawalOtp(supabaseAdmin, {
+      userId,
+      email: profile.email,
+      phone,
+      amount,
+    });
+
+    res.json({ success: true, message: "OTP sent to your email" });
+  } catch (error: any) {
+    const status = error.message?.includes("Too many") ? 429 : 500;
+    res.status(status).json({ error: error.message });
+  }
+});
+
+app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) => {
+  const body = parseJsonBody(req);
+  const userId = (req as AuthedRequest).authUserId;
+  const amountRaw = body.amountKesRequested ?? body.amount_kes_requested;
+  const amount = typeof amountRaw === "number" ? amountRaw : parseFloat(String(amountRaw ?? ""));
+  const phone = String(body.phone ?? "").trim();
+  const otpCode = String(body.otp ?? "").trim();
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Positive amountKesRequested required" });
+  }
+
+  if (!phone || !isValidSafaricomPhone(phone)) {
+    return res.status(400).json({ error: "Enter a valid Safaricom phone number" });
+  }
+
+  if (!otpCode) {
+    return res.status(400).json({ error: "OTP verification code is required" });
+  }
+
+  if (!isWithdrawalWindowNow()) {
+    const nextWindow = formatWithdrawalWindowDate(getNextWithdrawalWindowDate());
+    return res.status(400).json({
+      error: `Withdrawal requests open only on the first Tuesday of each month (from August 2026). Next window: ${nextWindow}.`,
+    });
+  }
+
+  const minimumWithdrawalKes = getMinimumWithdrawalKes();
+  if (amount < minimumWithdrawalKes) {
+    return res.status(400).json({
+      error: `Minimum withdrawal is Ksh ${minimumWithdrawalKes.toLocaleString("en-KE")}.`,
+    });
+  }
+
+  try {
+    const balance = await getEarningsBalanceKes(supabaseAdmin, userId);
+    if (balance < minimumWithdrawalKes) {
+      return res.status(400).json({
+        error: `You need at least Ksh ${minimumWithdrawalKes.toLocaleString("en-KE")} in earnings to request a withdrawal.`,
+      });
+    }
+    if (amount > balance) {
+      return res.status(400).json({
+        error: `Requested amount exceeds available balance (${balance.toFixed(2)} KES)`,
+      });
+    }
+
+    const verified = await verifyWithdrawalOtp(supabaseAdmin, userId, otpCode, timingSafeEqual);
+
+    const normalizedPhone = normalizeSafaricomPhone(phone);
+    if (verified.phone !== normalizedPhone) {
+      return res.status(400).json({ error: "Phone number does not match the verified OTP request" });
+    }
+    if (Math.round(verified.amount * 100) !== Math.round(amount * 100)) {
+      return res.status(400).json({ error: "Amount does not match the verified OTP request" });
+    }
+
     const now = new Date();
     const periodMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
       .toISOString()
@@ -3478,6 +3569,7 @@ app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) =
         amount_kes_requested: Math.round(amount * 100) / 100,
         period_month: periodMonth,
         status: "pending",
+        payout_phone: normalizedPhone,
       })
       .select("id")
       .single();
@@ -3490,6 +3582,11 @@ app.post("/api/earnings/withdrawal-request", requireSeekerMw, async (req, res) =
       }
       throw error;
     }
+
+    await supabaseAdmin
+      .from("profiles")
+      .update({ phone: normalizedPhone })
+      .eq("id", userId);
 
     res.json({ success: true, requestId: row?.id });
   } catch (error: any) {
@@ -3880,7 +3977,7 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
     let dataQ = supabaseAdmin.from("withdrawal_requests").select(
       `
         *,
-        profiles:user_id (email, full_name)
+        profiles:user_id (email, full_name, phone)
       `
     );
 
@@ -3916,6 +4013,61 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
   }
 });
 
+app.get("/api/admin/withdrawal-requests/export-csv", requireAdminMw, async (req, res) => {
+  const statusParam = (req.query.status as string | undefined)?.trim();
+  try {
+    let query = supabaseAdmin.from("withdrawal_requests").select(
+      `
+        *,
+        profiles:user_id (email, full_name, phone)
+      `
+    );
+
+    if (statusParam) {
+      const statuses = statusParam.split(",").map((s) => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        query = query.eq("status", statuses[0]);
+      } else if (statuses.length > 1) {
+        query = query.in("status", statuses);
+      }
+    }
+
+    const { data, error } = await query
+      .order("created_at", { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+
+    const csvEscape = (v: string) => {
+      if (/[",\r\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+      return v;
+    };
+
+    const header = "Full Name,Email,Phone (M-Pesa),Amount Requested (KES),Amount Paid (KES),Status,Period,Created At";
+    const lines = [header];
+    for (const r of data ?? []) {
+      const prof = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
+      const phone = r.payout_phone || prof?.phone || "";
+      lines.push([
+        csvEscape(prof?.full_name || ""),
+        csvEscape(prof?.email || ""),
+        csvEscape(phone),
+        csvEscape(String(Number(r.amount_kes_requested ?? 0).toFixed(2))),
+        csvEscape(String(Number(r.amount_paid_kes ?? 0).toFixed(2))),
+        csvEscape(r.status || ""),
+        csvEscape(r.period_month || ""),
+        csvEscape(r.created_at ? new Date(r.created_at).toISOString() : ""),
+      ].join(","));
+    }
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=withdrawal-requests-${dateStr}.csv`);
+    res.send(lines.join("\n"));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/api/admin/payout-planning-report", requireAdminMw, async (req, res) => {
   const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
     pageSize: 20,
@@ -3928,7 +4080,7 @@ app.get("/api/admin/payout-planning-report", requireAdminMw, async (req, res) =>
     const { data: openReqs, error: reqErr } = await supabaseAdmin
       .from("withdrawal_requests")
       .select(
-        "id, user_id, amount_kes_requested, amount_paid_kes, period_month, status, created_at, profiles:user_id (email, full_name)"
+        "id, user_id, amount_kes_requested, amount_paid_kes, period_month, status, created_at, payout_phone, profiles:user_id (email, full_name, phone)"
       )
       .in("status", ["pending", "paid_partial"])
       .order("created_at", { ascending: false });
@@ -5005,13 +5157,17 @@ app.get("/api/admin/support/tickets/:id", requireAdminMw, async (req, res) => {
         .select("id, full_name")
         .in("id", [...new Set(authorIds)]);
       for (const p of profiles ?? []) {
-        authorProfiles[p.id] = p.full_name || "Admin";
+        const name = p.full_name || "";
+        const initials = name.split(/\s+/).filter(Boolean).map((w: string) => w[0].toUpperCase()).join("");
+        authorProfiles[p.id] = initials || "Admin";
       }
     }
 
     const enrichedReplies = (replies ?? []).map((r: any) => ({
       ...r,
-      author_name: r.author_id ? (authorProfiles[r.author_id] || "Support Team") : (r.author_role === "user" ? ticket.name || ticket.email : "System"),
+      author_name: r.author_id
+        ? (r.author_role === "admin" ? (authorProfiles[r.author_id] || "Support") : (authorProfiles[r.author_id] || "Support Team"))
+        : (r.author_role === "user" ? ticket.name || ticket.email : "System"),
     }));
 
     return res.json({ ticket, replies: enrichedReplies });

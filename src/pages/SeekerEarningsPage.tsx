@@ -13,6 +13,8 @@ import {
   Download,
   Coins,
   Gift,
+  Smartphone,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 
@@ -79,7 +81,7 @@ export function SeekerEarningsPage({
   const [nextWithdrawalWindow, setNextWithdrawalWindow] = useState<string | null>(null);
   const [withdrawalWindowOpen, setWithdrawalWindowOpen] = useState(false);
   const [withdrawalSchedule, setWithdrawalSchedule] = useState<string | null>(null);
-  const [minWithdrawalKes, setMinWithdrawalKes] = useState(5000);
+  const [minWithdrawalKes, setMinWithdrawalKes] = useState(1500);
   const [canRequestWithdrawal, setCanRequestWithdrawal] = useState(false);
   const [kesPerToken, setKesPerToken] = useState(20);
   const [tokenExchangeEnabled, setTokenExchangeEnabled] = useState(false);
@@ -88,6 +90,11 @@ export function SeekerEarningsPage({
   const [giftEmail, setGiftEmail] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [gifting, setGifting] = useState(false);
+  const [phoneInput, setPhoneInput] = useState("");
+  const [otpStep, setOtpStep] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpLoading, setOtpLoading] = useState(false);
+  const [otpSent, setOtpSent] = useState(false);
 
   const previewTokens = (amountRaw: string): number => {
     const amount = parseFloat(amountRaw.replace(/,/g, ""));
@@ -119,7 +126,7 @@ export function SeekerEarningsPage({
       setNextWithdrawalWindow(sumJson.next_withdrawal_window ?? null);
       setWithdrawalWindowOpen(Boolean(sumJson.withdrawal_window_open));
       setWithdrawalSchedule(sumJson.withdrawal_schedule ?? null);
-      setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 5000));
+      setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 1500));
       setCanRequestWithdrawal(Boolean(sumJson.can_request_withdrawal));
 
       if (exchangeRes.ok) {
@@ -153,7 +160,12 @@ export function SeekerEarningsPage({
     load();
   }, [load]);
 
-  const handleWithdrawalRequest = async (e: FormEvent) => {
+  const isValidLocalPhone = (p: string): boolean => {
+    const cleaned = p.replace(/[\s-]/g, "");
+    return /^(07\d{8}|01\d{8}|\+?2547\d{8}|\+?2541\d{8})$/.test(cleaned);
+  };
+
+  const handleRequestOtp = async (e: FormEvent) => {
     e.preventDefault();
     if (!withdrawalAllowed) {
       showToast("Withdrawal requests are not available right now", "error");
@@ -168,6 +180,40 @@ export function SeekerEarningsPage({
       showToast(`Minimum withdrawal is Ksh ${minWithdrawalKes.toLocaleString("en-KE")}`, "error");
       return;
     }
+    if (!isValidLocalPhone(phoneInput)) {
+      showToast("Enter a valid Safaricom number (e.g. 0712345678)", "error");
+      return;
+    }
+    setOtpLoading(true);
+    try {
+      const res = await apiFetch("/api/earnings/withdrawal-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amountKesRequested: amount,
+          phone: phoneInput.trim(),
+        }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || "Could not send OTP");
+      setOtpStep(true);
+      setOtpSent(true);
+      setOtpCode("");
+      showToast("Verification code sent to your email", "success");
+    } catch (e: any) {
+      showToast(e.message || "Could not send OTP", "error");
+    } finally {
+      setOtpLoading(false);
+    }
+  };
+
+  const handleVerifyAndSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const amount = parseFloat(amountInput.replace(/,/g, ""));
+    if (!otpCode.trim() || !/^\d{6}$/.test(otpCode.replace(/\s/g, ""))) {
+      showToast("Enter the 6-digit code from your email", "error");
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await apiFetch("/api/earnings/withdrawal-request", {
@@ -175,20 +221,30 @@ export function SeekerEarningsPage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           amountKesRequested: amount,
+          phone: phoneInput.trim(),
+          otp: otpCode.replace(/\s/g, ""),
         }),
       });
       const j = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(j.error || "Request failed");
-      }
+      if (!res.ok) throw new Error(j.error || "Request failed");
       showToast("Withdrawal request submitted", "success");
       setAmountInput("");
+      setPhoneInput("");
+      setOtpCode("");
+      setOtpStep(false);
+      setOtpSent(false);
       await load();
     } catch (e: any) {
       showToast(e.message || "Could not submit request", "error");
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleCancelOtp = () => {
+    setOtpStep(false);
+    setOtpCode("");
+    setOtpSent(false);
   };
 
   const handleRedeemForTokens = async (e: FormEvent) => {
@@ -407,29 +463,112 @@ export function SeekerEarningsPage({
                     <>Withdrawal requests are not available right now.</>
                   )}
                 </div>
-              ) : (
-                <form onSubmit={handleWithdrawalRequest} className="flex flex-col sm:flex-row gap-3 mt-4">
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder={`Amount (KES, min ${minWithdrawalKes.toLocaleString("en-KE")})`}
-                    value={amountInput}
-                    onChange={(e) => setAmountInput(e.target.value)}
-                    className="flex-1 rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
-                  />
+              ) : !otpStep ? (
+                <form onSubmit={handleRequestOtp} className="space-y-3 mt-4">
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder={`Amount (KES, min ${minWithdrawalKes.toLocaleString("en-KE")})`}
+                      value={amountInput}
+                      onChange={(e) => setAmountInput(e.target.value)}
+                      className="flex-1 rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                    />
+                    <div className="relative flex-1">
+                      <Smartphone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+                      <input
+                        type="tel"
+                        inputMode="tel"
+                        placeholder="Safaricom number (e.g. 0712345678)"
+                        value={phoneInput}
+                        onChange={(e) => setPhoneInput(e.target.value)}
+                        maxLength={13}
+                        className="w-full rounded-xl bg-zinc-950 border border-zinc-700 pl-10 pr-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-zinc-500">
+                    Enter your Safaricom M-Pesa number. A verification code will be sent to your registered email.
+                  </p>
                   <button
                     type="submit"
                     disabled={
-                      submitting ||
+                      otpLoading ||
+                      !amountInput.trim() ||
+                      !phoneInput.trim() ||
                       (amountInput.trim() !== "" &&
                         (parseFloat(amountInput.replace(/,/g, "")) < minWithdrawalKes ||
                           !Number.isFinite(parseFloat(amountInput.replace(/,/g, "")))))
                     }
                     className="rounded-xl bg-emerald-500 text-black font-semibold px-6 py-3 hover:bg-emerald-400 disabled:opacity-50 transition-colors"
                   >
-                    {submitting ? "Submitting…" : "Submit request"}
+                    {otpLoading ? (
+                      <span className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Sending code…
+                      </span>
+                    ) : (
+                      "Continue"
+                    )}
                   </button>
                 </form>
+              ) : (
+                <div className="mt-4 space-y-4">
+                  <div className="rounded-xl bg-emerald-950/30 border border-emerald-500/20 px-4 py-3">
+                    <div className="flex items-start gap-3">
+                      <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm text-emerald-100 font-medium">Verify your withdrawal</p>
+                        <p className="text-xs text-zinc-400 mt-1">
+                          Enter the 6-digit code sent to your email to confirm withdrawal of{" "}
+                          <strong className="text-white">KES {formatKes(parseFloat(amountInput.replace(/,/g, "")) || 0)}</strong>{" "}
+                          to M-Pesa <strong className="text-white">{phoneInput}</strong>.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <form onSubmit={handleVerifyAndSubmit} className="space-y-3">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="Enter 6-digit code"
+                      value={otpCode}
+                      onChange={(e) => setOtpCode(e.target.value.replace(/[^0-9\s]/g, ""))}
+                      maxLength={7}
+                      autoFocus
+                      className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-4 py-3 text-white text-center text-lg tracking-widest font-mono placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                    />
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <button
+                        type="submit"
+                        disabled={submitting || otpCode.replace(/\s/g, "").length !== 6}
+                        className="flex-1 rounded-xl bg-emerald-500 text-black font-semibold px-6 py-3 hover:bg-emerald-400 disabled:opacity-50 transition-colors"
+                      >
+                        {submitting ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <Loader2 className="w-4 h-4 animate-spin" /> Submitting…
+                          </span>
+                        ) : (
+                          "Verify & Submit"
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRequestOtp}
+                        disabled={otpLoading}
+                        className="rounded-xl border border-zinc-700 text-zinc-300 font-medium px-6 py-3 hover:bg-zinc-800 disabled:opacity-50 transition-colors text-sm"
+                      >
+                        {otpLoading ? "Sending…" : "Resend code"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCancelOtp}
+                        className="rounded-xl border border-zinc-700 text-zinc-400 font-medium px-4 py-3 hover:bg-zinc-800 transition-colors text-sm"
+                      >
+                        Back
+                      </button>
+                    </div>
+                  </form>
+                </div>
               )}
             </section>
 
