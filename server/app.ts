@@ -3922,7 +3922,7 @@ app.get("/api/admin/prompts/:promptId/submissions", requireAdminMw, async (req, 
 
     const { data: subs, error: sErr } = await supabaseAdmin
       .from("prompt_submissions")
-      .select("id, user_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, grading_note")
+      .select("id, user_id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, grading_note, quality_report, quality_checked_at")
       .eq("prompt_id", promptId)
       .order("grade_status", { ascending: true })
       .order("submitted_at", { ascending: false });

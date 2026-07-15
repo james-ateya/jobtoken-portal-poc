@@ -10,9 +10,14 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  Eye,
 } from "lucide-react";
 import { apiFetch } from "../lib/apiFetch";
 import { cn } from "../lib/utils";
+import {
+  PromptSubmissionReviewModal,
+  type PromptReviewSubmission,
+} from "../components/PromptSubmissionReviewModal";
 
 type PromptInfo = {
   id: string;
@@ -22,9 +27,21 @@ type PromptInfo = {
   series_title: string | null;
 };
 
+type QualityReportRow = {
+  ai_probability: number;
+  relevance_score: number;
+  spelling_grammar_score: number;
+  effort_score: number;
+  flags: string[];
+  recommendation: "pass" | "review" | "fail";
+  summary: string;
+  plagiarism?: { is_plagiarized: boolean; similarity_score: number };
+} | null;
+
 type Submission = {
   id: string;
   user_id: string;
+  prompt_id: string;
   answer_text: string;
   word_count: number;
   tokens_charged: number;
@@ -34,6 +51,8 @@ type Submission = {
   grading_note: string | null;
   seeker_name: string | null;
   seeker_email: string | null;
+  quality_report?: QualityReportRow;
+  quality_checked_at?: string | null;
 };
 
 const GRADE_ICON = {
@@ -48,6 +67,42 @@ const GRADE_LABEL = {
   pending: "text-zinc-500",
 };
 
+function QualityDot({ report }: { report: QualityReportRow }) {
+  if (!report) return null;
+  const rec = report.recommendation;
+  const cls =
+    rec === "pass"
+      ? "bg-emerald-500"
+      : rec === "fail"
+        ? "bg-red-500"
+        : "bg-amber-500";
+  return (
+    <span
+      className={`inline-block w-2.5 h-2.5 rounded-full ${cls}`}
+      title={`AI recommendation: ${rec}`}
+    />
+  );
+}
+
+function toReviewSubmission(s: Submission, prompt: PromptInfo): PromptReviewSubmission {
+  return {
+    id: s.id,
+    answer_text: s.answer_text,
+    word_count: s.word_count,
+    tokens_charged: s.tokens_charged,
+    grade_status: s.grade_status,
+    submitted_at: s.submitted_at,
+    prompt_headline: prompt.headline,
+    reward_kes: prompt.reward_kes,
+    series_title: prompt.series_title,
+    seeker_email: s.seeker_email,
+    seeker_name: s.seeker_name,
+    grading_note: s.grading_note ?? null,
+    quality_report: s.quality_report ?? null,
+    quality_checked_at: s.quality_checked_at ?? null,
+  };
+}
+
 export function AdminPromptReviewPage({
   showToast,
 }: {
@@ -59,6 +114,8 @@ export function AdminPromptReviewPage({
   const [loading, setLoading] = useState(true);
   const [regradingId, setRegradingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [modalSubmission, setModalSubmission] = useState<Submission | null>(null);
+  const [modalGradingId, setModalGradingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!promptId) return;
@@ -115,6 +172,40 @@ export function AdminPromptReviewPage({
       showToast(e.message || "Regrade failed", "error");
     } finally {
       setRegradingId(null);
+    }
+  };
+
+  const handleModalGrade = async (submissionId: string, grade: "pass" | "fail", gradingNote: string) => {
+    setModalGradingId(submissionId);
+    try {
+      const res = await apiFetch(
+        `/api/admin/prompt-submissions/${submissionId}/grade`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            grade,
+            gradingNote: gradingNote.trim() || undefined,
+            skipEmail: grade === "fail",
+          }),
+        }
+      );
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.success) throw new Error(j.error || "Grade failed");
+
+      const adj = Number(j.earningsAdjustmentKes || 0);
+      let message = grade === "pass" ? "Marked as pass." : "Marked as fail.";
+      if (adj > 0) message += ` ${adj.toLocaleString("en-KE")} KES credited.`;
+      else if (adj < 0) message += ` ${Math.abs(adj).toLocaleString("en-KE")} KES reversed.`;
+      if (j.emailSent) message += " Email sent.";
+      showToast(message, "success");
+
+      setModalSubmission(null);
+      load();
+    } catch (e: any) {
+      showToast(e.message || "Grade failed", "error");
+    } finally {
+      setModalGradingId(null);
     }
   };
 
@@ -243,6 +334,7 @@ export function AdminPromptReviewPage({
                       {s.seeker_name || "Unknown"}
                     </span>
                     <span className="text-xs text-zinc-600">{s.seeker_email || s.user_id}</span>
+                    <QualityDot report={s.quality_report ?? null} />
                   </div>
                   <div className="flex items-center gap-3 mt-0.5 text-[11px] text-zinc-500">
                     <span className={cn("font-bold uppercase", GRADE_LABEL[s.grade_status])}>
@@ -277,26 +369,36 @@ export function AdminPromptReviewPage({
                     </div>
                   )}
 
-                  {canRegrade && (
-                    <div className="flex items-center gap-3 pt-2">
-                      <button
-                        type="button"
-                        onClick={() => handleRegrade(s.id)}
-                        disabled={isRegrading}
-                        className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-bold hover:bg-red-500/20 disabled:opacity-40 transition-colors"
-                      >
-                        {isRegrading ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <XCircle className="w-4 h-4" />
-                        )}
-                        Regrade to Fail
-                      </button>
-                      <span className="text-[11px] text-zinc-600">
-                        Reverses KES {prompt.reward_kes.toLocaleString("en-KE")} · No email sent
-                      </span>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-3 pt-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setModalSubmission(s)}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-zinc-300 text-sm font-bold hover:bg-white/10 transition-colors"
+                    >
+                      <Eye className="w-4 h-4" />
+                      AI Review
+                    </button>
+                    {canRegrade && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleRegrade(s.id)}
+                          disabled={isRegrading}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm font-bold hover:bg-red-500/20 disabled:opacity-40 transition-colors"
+                        >
+                          {isRegrading ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <XCircle className="w-4 h-4" />
+                          )}
+                          Regrade to Fail
+                        </button>
+                        <span className="text-[11px] text-zinc-600">
+                          Reverses KES {prompt.reward_kes.toLocaleString("en-KE")} · No email sent
+                        </span>
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
             </motion.div>
@@ -307,6 +409,15 @@ export function AdminPromptReviewPage({
       {submissions.length === 0 && (
         <p className="text-center text-zinc-500 py-16">No submissions for this prompt yet.</p>
       )}
+
+      {modalSubmission && prompt ? (
+        <PromptSubmissionReviewModal
+          submission={toReviewSubmission(modalSubmission, prompt)}
+          gradingId={modalGradingId}
+          onClose={() => setModalSubmission(null)}
+          onGrade={handleModalGrade}
+        />
+      ) : null}
     </main>
   );
 }
