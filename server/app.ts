@@ -5414,6 +5414,12 @@ app.post("/api/support/tickets/reply", async (req, res) => {
 
     if (ticket.status === "resolved") {
       await supabaseAdmin.from("support_tickets").update({ status: "open" }).eq("id", ticket.id);
+    } else {
+      // Touch updated_at so admin inbox bells re-surface the ticket as unread.
+      await supabaseAdmin
+        .from("support_tickets")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", ticket.id);
     }
 
     return res.json({ success: true });
@@ -5426,6 +5432,118 @@ app.post("/api/support/tickets/reply", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Support Tickets — admin routes
 // ---------------------------------------------------------------------------
+
+/** Open / in-progress tickets that this admin has not yet marked read (or that changed since). */
+app.get("/api/admin/support/alerts", requireAdminMw, async (req, res) => {
+  try {
+    const adminId = (req as AuthedRequest).authUserId;
+    if (!adminId) return res.status(401).json({ error: "Unauthorized" });
+
+    const { data: tickets, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select(
+        "id, ticket_number, email, name, subject, status, priority, category, created_at, updated_at"
+      )
+      .in("status", ["open", "in_progress"])
+      .order("updated_at", { ascending: false })
+      .limit(100);
+
+    if (error) throw error;
+
+    const list = tickets ?? [];
+
+    const [{ count: openCountExact }, { count: inProgressCountExact }] = await Promise.all([
+      supabaseAdmin
+        .from("support_tickets")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "open"),
+      supabaseAdmin
+        .from("support_tickets")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "in_progress"),
+    ]);
+    const openCount = openCountExact ?? 0;
+    const activeCount = openCount + (inProgressCountExact ?? 0);
+
+    const ids = list.map((t) => t.id);
+    const readByTicket = new Map<string, string>();
+    if (ids.length) {
+      const { data: reads, error: readErr } = await supabaseAdmin
+        .from("admin_support_ticket_reads")
+        .select("ticket_id, read_at")
+        .eq("admin_id", adminId)
+        .in("ticket_id", ids);
+      if (readErr) throw readErr;
+      for (const r of reads ?? []) {
+        readByTicket.set(r.ticket_id as string, r.read_at as string);
+      }
+    }
+
+    const items = list.map((t) => {
+      const readAt = readByTicket.get(t.id) ?? null;
+      const unread = !readAt || new Date(t.updated_at).getTime() > new Date(readAt).getTime();
+      return { ...t, read_at: readAt, unread };
+    });
+
+    const unread = items.filter((t) => t.unread);
+
+    return res.json({
+      open_count: openCount,
+      active_count: activeCount,
+      unread_count: unread.length,
+      // Unread first for the bell dropdown; include recent read actives below the fold.
+      tickets: [...unread, ...items.filter((t) => !t.unread)].slice(0, 30),
+    });
+  } catch (err: any) {
+    console.error("GET /api/admin/support/alerts:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/support/alerts/read", requireAdminMw, async (req, res) => {
+  try {
+    const adminId = (req as AuthedRequest).authUserId;
+    if (!adminId) return res.status(401).json({ error: "Unauthorized" });
+
+    const { ticket_id, all } = req.body ?? {};
+    const now = new Date().toISOString();
+
+    if (all === true) {
+      const { data: tickets, error } = await supabaseAdmin
+        .from("support_tickets")
+        .select("id")
+        .in("status", ["open", "in_progress"]);
+      if (error) throw error;
+      const rows = (tickets ?? []).map((t) => ({
+        admin_id: adminId,
+        ticket_id: t.id,
+        read_at: now,
+      }));
+      if (rows.length) {
+        const { error: upsertErr } = await supabaseAdmin
+          .from("admin_support_ticket_reads")
+          .upsert(rows, { onConflict: "admin_id,ticket_id" });
+        if (upsertErr) throw upsertErr;
+      }
+      return res.json({ success: true, marked: rows.length });
+    }
+
+    if (!ticket_id || typeof ticket_id !== "string") {
+      return res.status(400).json({ error: "ticket_id is required (or pass all: true)." });
+    }
+
+    const { error: upsertErr } = await supabaseAdmin.from("admin_support_ticket_reads").upsert(
+      { admin_id: adminId, ticket_id, read_at: now },
+      { onConflict: "admin_id,ticket_id" }
+    );
+    if (upsertErr) throw upsertErr;
+
+    return res.json({ success: true, marked: 1 });
+  } catch (err: any) {
+    console.error("POST /api/admin/support/alerts/read:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 app.get("/api/admin/support/stats", requireAdminMw, async (_req, res) => {
   try {

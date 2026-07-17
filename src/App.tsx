@@ -35,6 +35,9 @@ import { TermsOfUsePage } from "./pages/TermsOfUsePage";
 import { ContactPage } from "./pages/ContactPage";
 import { TicketTrackPage } from "./pages/TicketTrackPage";
 import { AdminSupportPage } from "./pages/AdminSupportPage";
+import { AdminSupportBell } from "./components/AdminSupportBell";
+import { SessionExpiryGuard } from "./components/SessionExpiryGuard";
+import { logoutToHome } from "./lib/sessionExpiry";
 import { motion, AnimatePresence } from "motion/react";
 import { LogIn, UserPlus, LogOut, Briefcase, X, CheckCircle, AlertCircle, LayoutDashboard, Users, Shield, UserCircle, ClipboardList, Building2, Banknote, PenLine, PauseCircle, Headset } from "lucide-react";
 
@@ -120,6 +123,7 @@ export default function App() {
 
   return (
     <Router>
+      <SessionExpiryGuard />
       <div className="min-h-screen bg-zinc-200 text-zinc-900 dark:bg-[#0a0a0a] dark:text-white font-sans selection:bg-emerald-500/30 transition-colors">
         <AnimatePresence>
           {toast && (
@@ -235,6 +239,7 @@ export default function App() {
                     <Headset className="w-4 h-4" />
                     Support
                   </Link>
+                  {userRole === "admin" && <AdminSupportBell />}
                   <div className="flex items-center gap-4">
                     <div className="hidden md:flex flex-col items-end">
                       <span className="text-sm font-medium text-zinc-800 dark:text-white">
@@ -245,7 +250,7 @@ export default function App() {
                       </span>
                     </div>
                     <button
-                      onClick={() => supabase.auth.signOut()}
+                      onClick={() => void logoutToHome("Manual sign out")}
                       className="p-2 rounded-full text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white transition-colors"
                     >
                       <LogOut className="w-5 h-5" />

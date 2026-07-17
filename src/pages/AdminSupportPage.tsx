@@ -1,4 +1,5 @@
 import { useState, useEffect, type FormEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Headset, Loader2, ChevronDown, X, Send, Clock, MessageSquare,
@@ -99,6 +100,7 @@ interface Props {
 }
 
 export function AdminSupportPage({ showToast }: Props) {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [stats, setStats] = useState<Record<string, number>>({ open: 0, in_progress: 0, resolved: 0, closed: 0 });
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +135,19 @@ export function AdminSupportPage({ showToast }: Props) {
 
   useEffect(() => { loadStats(); }, []);
   useEffect(() => { loadTickets(); }, [page, statusFilter, priorityFilter, categoryFilter, searchDebounce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Deep-link from admin bell: /admin/support?ticket=<id>
+  useEffect(() => {
+    const ticketId = searchParams.get("ticket");
+    if (!ticketId || ticketId === selectedId) return;
+    void loadDetail(ticketId).then(() => {
+      apiFetch("/api/admin/support/alerts/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket_id: ticketId }),
+      }).catch(() => {});
+    });
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadStats() {
     try {
@@ -170,18 +185,29 @@ export function AdminSupportPage({ showToast }: Props) {
     setReplyBody("");
     setIsInternal(false);
     setNewStatus("");
+    if (searchParams.get("ticket") !== id) {
+      setSearchParams({ ticket: id }, { replace: true });
+    }
 
     try {
       const res = await apiFetch(`/api/admin/support/tickets/${id}`);
       const data = await res.json();
+      if (!res.ok || !data.ticket) throw new Error(data.error || "Failed to load ticket");
       setDetail(data.ticket);
       setDetailReplies(data.replies || []);
     } catch {
       showToast("Failed to load ticket", "error");
       setSelectedId(null);
+      setSearchParams({}, { replace: true });
     } finally {
       setDetailLoading(false);
     }
+  }
+
+  function closeDetail() {
+    setSelectedId(null);
+    setDetail(null);
+    setSearchParams({}, { replace: true });
   }
 
   async function handleReply(e: FormEvent) {
@@ -412,7 +438,7 @@ export function AdminSupportPage({ showToast }: Props) {
                       </div>
                       <button
                         type="button"
-                        onClick={() => { setSelectedId(null); setDetail(null); }}
+                        onClick={closeDetail}
                         className="p-1.5 rounded-lg hover:bg-white/10 transition-colors text-zinc-500"
                       >
                         <X className="w-5 h-5" />
