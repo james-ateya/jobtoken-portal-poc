@@ -22,6 +22,7 @@ import {
   RotateCcw,
   TrendingUp,
   KeyRound,
+  ClipboardList,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
@@ -283,14 +284,25 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
         ) : null}
       </td>
       <td className="px-6 py-4 text-right">
-        <button
-          type="button"
-          onClick={() => openDetail(u.id)}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/15 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-        >
-          <Eye className="w-4 h-4" />
-          Details
-        </button>
+        <div className="inline-flex flex-wrap items-center justify-end gap-2">
+          {u.role === "seeker" ? (
+            <Link
+              to={`/admin/users/${u.id}/works`}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/30 text-sm font-bold text-emerald-300 hover:bg-emerald-500/10 transition-colors"
+            >
+              <ClipboardList className="w-4 h-4" />
+              View works
+            </Link>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => openDetail(u.id)}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/15 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+          >
+            <Eye className="w-4 h-4" />
+            Details
+          </button>
+        </div>
       </td>
     </>
   );
@@ -1104,6 +1116,15 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                     </div>
 
                     <div className="flex flex-wrap gap-3 pt-2">
+                      {profile.role === "seeker" && detailId ? (
+                        <Link
+                          to={`/admin/users/${detailId}/works`}
+                          className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/10"
+                        >
+                          <ClipboardList className="w-4 h-4" />
+                          View works
+                        </Link>
+                      ) : null}
                       {(profile.role === "employer" || profile.role === "admin") && !editMode ? (
                         <button
                           type="button"

@@ -14,6 +14,7 @@ import { EmployerPromptSeriesListPage } from "./pages/EmployerPromptSeriesListPa
 import { EmployerPromptSeriesEditorPage } from "./pages/EmployerPromptSeriesEditorPage";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
+import { AdminUserWorksPage } from "./pages/AdminUserWorksPage";
 import { AdminPromptGradingPage } from "./pages/AdminPromptGradingPage";
 import { AdminWithdrawalsPage } from "./pages/AdminWithdrawalsPage";
 import { AdminPayoutPlanningPage } from "./pages/AdminPayoutPlanningPage";
@@ -585,6 +586,22 @@ export default function App() {
               <ProtectedRoute user={user} loading={loading}>
                 {userRole === "admin" ? (
                   <AdminUsersPage showToast={showToast} />
+                ) : (
+                  <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
+                    <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />
+                    <h1 className="text-2xl font-bold">Access Denied</h1>
+                    <p className="text-zinc-500 mt-2">You do not have administrative privileges to view this page.</p>
+                  </div>
+                )}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/users/:userId/works"
+            element={
+              <ProtectedRoute user={user} loading={loading}>
+                {userRole === "admin" ? (
+                  <AdminUserWorksPage showToast={showToast} />
                 ) : (
                   <div className="min-h-[60vh] flex flex-col items-center justify-center text-center px-6">
                     <Shield className="w-16 h-16 text-red-500 mb-4 opacity-20" />

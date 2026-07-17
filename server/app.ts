@@ -283,6 +283,16 @@ function authorizeCron(req: express.Request): boolean {
   return typeof header === "string" && header === secret;
 }
 
+/** 401 helper so missing CRON_SECRET is obvious in Vercel logs. */
+function cronUnauthorized(res: express.Response) {
+  const configured = Boolean(process.env.CRON_SECRET?.trim());
+  return res.status(401).json({
+    error: configured
+      ? "Unauthorized cron request (Authorization Bearer must match CRON_SECRET)"
+      : "CRON_SECRET is not set in this Vercel environment",
+  });
+}
+
 async function adminPurgeUserDataBeforeDelete(userId: string, role: string): Promise<void> {
   if (role === "employer") {
     const { data: jobs } = await supabaseAdmin.from("jobs").select("id").eq("posted_by", userId);
@@ -820,7 +830,7 @@ app.get("/api/auth/session-profile", requireAuthMw, async (req, res) => {
 /** Daily cron: email users whose tokens expire in WALLET_TOKEN_EXPIRY_REMINDER_DAYS (default 2). */
 app.get("/api/cron/token-expiry-reminders", async (req, res) => {
   if (!authorizeCron(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return cronUnauthorized(res);
   }
 
   try {
@@ -835,7 +845,7 @@ app.get("/api/cron/token-expiry-reminders", async (req, res) => {
 /** Weekly cron (Monday): prompts & rewards digest for segments A/B. */
 app.get("/api/cron/weekly-engagement-digest", async (req, res) => {
   if (!authorizeCron(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return cronUnauthorized(res);
   }
 
   try {
@@ -853,7 +863,7 @@ app.get("/api/cron/weekly-engagement-digest", async (req, res) => {
  */
 app.get("/api/cron/no-topup-triggers", async (req, res) => {
   if (!authorizeCron(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return cronUnauthorized(res);
   }
 
   try {
@@ -868,7 +878,7 @@ app.get("/api/cron/no-topup-triggers", async (req, res) => {
 /** Daily cron: near-withdraw + after-fail (+ no-topup backup). */
 app.get("/api/cron/engagement-triggers", async (req, res) => {
   if (!authorizeCron(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return cronUnauthorized(res);
   }
 
   try {
@@ -4657,14 +4667,25 @@ app.get("/api/admin/payout-planning-report", requireAdminMw, async (req, res) =>
   }
 });
 
-app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, res) => {
+async function handleAdminUserPromptWorks(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
   const { userId } = req.params;
-  if (!userId) return res.status(400).json({ error: "userId required" });
+  if (!userId) {
+    res.status(400).json({ error: "userId required" });
+    return;
+  }
 
   const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
     pageSize: 15,
     maxPageSize: 100,
   });
+  const statusFilter = String(req.query.status || "all").toLowerCase();
+  const statusOk =
+    statusFilter === "pass" || statusFilter === "fail" || statusFilter === "pending"
+      ? statusFilter
+      : null;
 
   try {
     const { data: profile, error: profileErr } = await supabaseAdmin
@@ -4673,14 +4694,19 @@ app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, r
       .eq("id", userId)
       .maybeSingle();
     if (profileErr) throw profileErr;
-    if (!profile) return res.status(404).json({ error: "User not found" });
+    if (!profile) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
 
     const earningsBalanceKes = await getEarningsBalanceKes(supabaseAdmin, userId);
 
-    const { count: submissionsTotal, error: totalErr } = await supabaseAdmin
+    let totalQuery = supabaseAdmin
       .from("prompt_submissions")
       .select("*", { count: "exact", head: true })
       .eq("user_id", userId);
+    if (statusOk) totalQuery = totalQuery.eq("grade_status", statusOk);
+    const { count: submissionsTotal, error: totalErr } = await totalQuery;
     if (totalErr) throw totalErr;
 
     const countByStatus = async (status: string) => {
@@ -4702,7 +4728,7 @@ app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, r
         sumPromptSubmissionCreditsKes(supabaseAdmin, userId),
       ]);
 
-    const { data: submissions, error: subErr } = await supabaseAdmin
+    let listQuery = supabaseAdmin
       .from("prompt_submissions")
       .select(
         "id, prompt_id, answer_text, word_count, tokens_charged, grade_status, submitted_at, graded_at, graded_by, grading_note"
@@ -4710,6 +4736,9 @@ app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, r
       .eq("user_id", userId)
       .order("submitted_at", { ascending: false })
       .range(from, to);
+    if (statusOk) listQuery = listQuery.eq("grade_status", statusOk);
+
+    const { data: submissions, error: subErr } = await listQuery;
     if (subErr) throw subErr;
 
     const submissionList = submissions ?? [];
@@ -4827,8 +4856,14 @@ app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, r
       };
     });
 
+    // Summary counts stay global for the user; list/total respect status filter.
+    const { count: allSubmissionsTotal } = await supabaseAdmin
+      .from("prompt_submissions")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+
     const summary = {
-      submissions_total: submissionsTotal ?? 0,
+      submissions_total: allSubmissionsTotal ?? 0,
       passed_count: passedCount,
       failed_count: failedCount,
       pending_count: pendingCount,
@@ -4844,10 +4879,13 @@ app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, async (req, r
       ...paginationMeta(submissionsTotal ?? 0, page, pageSize),
     });
   } catch (error: any) {
-    console.error("GET /api/admin/payout-planning/user/:userId:", error);
+    console.error("admin user prompt works:", error);
     res.status(500).json({ error: error.message });
   }
-});
+}
+
+app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, handleAdminUserPromptWorks);
+app.get("/api/admin/users/:userId/works", requireAdminMw, handleAdminUserPromptWorks);
 
 app.get("/api/admin/export-earnings-ledger", requireAdminMw, async (_req, res) => {
   try {
@@ -5844,7 +5882,7 @@ app.post("/api/admin/support/tickets/:id/replies", requireAdminMw, async (req, r
 
 app.post("/api/cron/close-stale-tickets", async (req, res) => {
   if (!authorizeCron(req)) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return cronUnauthorized(res);
   }
   try {
     const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
