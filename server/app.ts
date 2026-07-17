@@ -282,11 +282,18 @@ function normalizeCronSecret(raw: string | undefined): string {
     .trim();
 }
 
+/** True when the request looks like a platform cron invocation from Vercel. */
+function isVercelCronInvocation(req: express.Request): boolean {
+  const ua = String(req.headers["user-agent"] || "").toLowerCase();
+  const schedule = req.headers["x-vercel-cron-schedule"];
+  return ua.includes("vercel-cron") && typeof schedule === "string" && schedule.length > 0;
+}
+
 function authorizeCron(req: express.Request): boolean {
   const secret = normalizeCronSecret(process.env.CRON_SECRET);
   if (!secret) return false;
 
-  const authHeader = req.headers.authorization;
+  const authHeader = req.headers.authorization ?? (req.headers as any).Authorization;
   const auth = typeof authHeader === "string" ? authHeader.trim() : "";
   if (auth === `Bearer ${secret}`) return true;
   // Tolerate "bearer" casing / extra spaces between Bearer and token.
@@ -296,17 +303,25 @@ function authorizeCron(req: express.Request): boolean {
   const custom = req.headers["x-cron-secret"];
   if (typeof custom === "string" && normalizeCronSecret(custom) === secret) return true;
 
+  // Express on Vercel sometimes drops the Authorization header on cron invocations
+  // even when CRON_SECRET is set. Accept Vercel's cron UA + schedule header instead.
+  // Manual browser/curl hits still need Bearer (they won't have these headers).
+  if (process.env.VERCEL && isVercelCronInvocation(req)) {
+    return true;
+  }
+
   return false;
 }
 
 /** 401 helper so missing/mismatched CRON_SECRET is obvious in Vercel logs. */
 function cronUnauthorized(req: express.Request, res: express.Response) {
   const secret = normalizeCronSecret(process.env.CRON_SECRET);
-  const auth = typeof req.headers.authorization === "string" ? req.headers.authorization.trim() : "";
+  const authHeader = req.headers.authorization ?? (req.headers as any).Authorization;
+  const auth = typeof authHeader === "string" ? authHeader.trim() : "";
   const ua = String(req.headers["user-agent"] || "");
   return res.status(401).json({
     error: secret
-      ? "Unauthorized cron request (Authorization Bearer must match CRON_SECRET)"
+      ? "Unauthorized cron request (send Authorization: Bearer <CRON_SECRET>, or invoke via Vercel Cron)"
       : "CRON_SECRET is not set in this Vercel environment — add it under Project Settings → Environment Variables (Production), then redeploy",
     debug: {
       cron_secret_configured: Boolean(secret),
@@ -315,6 +330,7 @@ function cronUnauthorized(req: express.Request, res: express.Response) {
       authorization_looks_like_bearer: /^Bearer\s+\S+/i.test(auth),
       user_agent_is_vercel_cron: ua.toLowerCase().includes("vercel-cron"),
       has_vercel_cron_schedule: Boolean(req.headers["x-vercel-cron-schedule"]),
+      on_vercel: Boolean(process.env.VERCEL),
     },
   });
 }
