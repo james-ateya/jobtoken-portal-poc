@@ -4929,6 +4929,133 @@ async function handleAdminUserPromptWorks(
 app.get("/api/admin/payout-planning/user/:userId", requireAdminMw, handleAdminUserPromptWorks);
 app.get("/api/admin/users/:userId/works", requireAdminMw, handleAdminUserPromptWorks);
 
+/** Job applications for a seeker — used on admin user activity page. */
+app.get("/api/admin/users/:userId/applications", requireAdminMw, async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const { page, pageSize, from, to } = parsePageParams(req.query as Record<string, unknown>, {
+    pageSize: 50,
+    maxPageSize: 100,
+  });
+
+  try {
+    const { data: profile, error: profileErr } = await supabaseAdmin
+      .from("profiles")
+      .select("id, email, full_name, role")
+      .eq("id", userId)
+      .maybeSingle();
+    if (profileErr) throw profileErr;
+    if (!profile) return res.status(404).json({ error: "User not found" });
+
+    const { count, error: countErr } = await supabaseAdmin
+      .from("applications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+    if (countErr) throw countErr;
+
+    const { data: apps, error: appsErr } = await supabaseAdmin
+      .from("applications")
+      .select("id, job_id, status, notes, created_at, updated_at")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .range(from, to);
+    if (appsErr) throw appsErr;
+
+    const list = apps ?? [];
+    const jobIds = [...new Set(list.map((a) => a.job_id).filter(Boolean))] as string[];
+
+    const jobMap = new Map<
+      string,
+      {
+        title: string | null;
+        job_type: string | null;
+        token_cost: number | null;
+        posted_by: string | null;
+        closes_at: string | null;
+      }
+    >();
+    const employerMap = new Map<string, { full_name: string | null; company_name: string | null; email: string | null }>();
+
+    if (jobIds.length > 0) {
+      const jobs = await fetchRowsInIdBatches<{
+        id: string;
+        title: string | null;
+        job_type: string | null;
+        token_cost: number | null;
+        posted_by: string | null;
+        closes_at: string | null;
+      }>(jobIds, (chunk) =>
+        supabaseAdmin
+          .from("jobs")
+          .select("id, title, job_type, token_cost, posted_by, closes_at")
+          .in("id", chunk)
+      );
+      for (const job of jobs) {
+        jobMap.set(job.id, {
+          title: job.title,
+          job_type: job.job_type,
+          token_cost: job.token_cost != null ? Number(job.token_cost) : null,
+          posted_by: job.posted_by,
+          closes_at: job.closes_at,
+        });
+      }
+
+      const employerIds = [
+        ...new Set(jobs.map((j) => j.posted_by).filter((id): id is string => Boolean(id))),
+      ];
+      if (employerIds.length > 0) {
+        const employers = await fetchRowsInIdBatches<{
+          id: string;
+          full_name: string | null;
+          company_name: string | null;
+          email: string | null;
+        }>(employerIds, (chunk) =>
+          supabaseAdmin
+            .from("profiles")
+            .select("id, full_name, company_name, email")
+            .in("id", chunk)
+        );
+        for (const emp of employers) {
+          employerMap.set(emp.id, {
+            full_name: emp.full_name,
+            company_name: emp.company_name,
+            email: emp.email,
+          });
+        }
+      }
+    }
+
+    const applications = list.map((app) => {
+      const job = app.job_id ? jobMap.get(app.job_id) : null;
+      const employer = job?.posted_by ? employerMap.get(job.posted_by) : null;
+      return {
+        id: app.id,
+        status: app.status || "pending",
+        notes: app.notes ?? null,
+        applied_at: app.created_at,
+        updated_at: app.updated_at ?? null,
+        job_id: app.job_id,
+        job_title: job?.title ?? null,
+        job_type: job?.job_type ?? null,
+        token_cost: job?.token_cost ?? null,
+        closes_at: job?.closes_at ?? null,
+        employer_name: employer?.company_name || employer?.full_name || null,
+        employer_email: employer?.email ?? null,
+      };
+    });
+
+    return res.json({
+      user: profile,
+      applications,
+      ...paginationMeta(count ?? 0, page, pageSize),
+    });
+  } catch (error: any) {
+    console.error("GET /api/admin/users/:userId/applications:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/api/admin/export-earnings-ledger", requireAdminMw, async (_req, res) => {
   try {
     const { data: rows, error } = await supabaseAdmin

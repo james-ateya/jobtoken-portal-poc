@@ -283,24 +283,25 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
           </p>
         ) : null}
       </td>
-      <td className="px-6 py-4 text-right">
-        <div className="inline-flex flex-wrap items-center justify-end gap-2">
-          {u.role === "seeker" ? (
+      <td className="px-3 sm:px-4 py-4 text-right sticky right-0 z-[1] bg-zinc-950/95 backdrop-blur border-l border-white/5">
+        <div className="inline-flex flex-nowrap items-center justify-end gap-2">
+          {(roleTab === "seeker" || u.role === "seeker") && (
             <Link
               to={`/admin/users/${u.id}/works`}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/30 text-sm font-bold text-emerald-300 hover:bg-emerald-500/10 transition-colors"
+              title="Prompts, admin reviews, and job applications"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500 text-black text-xs sm:text-sm font-bold hover:bg-emerald-400 transition-colors shrink-0"
             >
               <ClipboardList className="w-4 h-4" />
-              View works
+              <span>Activity</span>
             </Link>
-          ) : null}
+          )}
           <button
             type="button"
             onClick={() => openDetail(u.id)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-white/15 text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-xs sm:text-sm font-bold text-emerald-400 hover:bg-emerald-500/10 transition-colors shrink-0"
           >
             <Eye className="w-4 h-4" />
-            Details
+            <span>Details</span>
           </button>
         </div>
       </td>
@@ -707,7 +708,9 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Earnings (KES)</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Member days</th>
                   <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500">Status</th>
-                  <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right">Actions</th>
+                  <th className="px-3 sm:px-4 py-4 text-xs font-bold uppercase tracking-widest text-zinc-500 text-right sticky right-0 z-[2] bg-zinc-950/95 backdrop-blur border-l border-white/5 min-w-[11rem]">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1122,7 +1125,7 @@ export function AdminUsersPage({ showToast }: { showToast: (m: string, t?: "succ
                           className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/10"
                         >
                           <ClipboardList className="w-4 h-4" />
-                          View works
+                          Activity
                         </Link>
                       ) : null}
                       {(profile.role === "employer" || profile.role === "admin") && !editMode ? (
