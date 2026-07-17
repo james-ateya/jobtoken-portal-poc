@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizeEmail } from "./auth-otp.js";
 import { loadBlacklistForEmails } from "./email-blacklist.js";
+import { getAppUrl, getPortalUrl } from "./app-url.js";
 
 export type EngagementProfile = {
   id: string;
@@ -15,12 +16,11 @@ export type EngagementProfile = {
 };
 
 export function appBaseUrl(): string {
-  return (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+  return getAppUrl();
 }
 
 export function portalUrl(): string {
-  const appUrl = appBaseUrl();
-  return appUrl.includes("localhost") ? appUrl : "https://www.jobtoken.co.ke";
+  return getPortalUrl();
 }
 
 export function unsubscribeUrl(token: string): string {

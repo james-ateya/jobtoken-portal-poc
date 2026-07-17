@@ -1,4 +1,5 @@
 import { sendMail } from "./mail.js";
+import { getAppUrl, getPortalUrl } from "./app-url.js";
 
 function escapeHtml(s: string): string {
   return s
@@ -115,9 +116,9 @@ export async function sendSeekerWelcomeEmail(params: {
   to: string;
   fullName: string;
 }): Promise<void> {
-  const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+  const appUrl = getAppUrl();
+  const portalUrl = getPortalUrl();
   const dashboardUrl = `${appUrl}/dashboard`;
-  const portalUrl = appUrl.includes("localhost") ? appUrl : "https://www.jobtoken.co.ke";
 
   await sendMail({
     to: params.to,
