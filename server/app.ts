@@ -65,6 +65,12 @@ import {
 import { getWalletTokenExpiresAt, getWalletTokenExpiryDays, walletExpiryFields } from "./wallet-token-expiry.js";
 import { notifyTokenWalletCredited } from "./token-wallet-email.js";
 import { processTokenExpiryReminders } from "./token-expiry-reminders.js";
+import {
+  processEngagementTriggers,
+  processNoTopupTriggers,
+  processWeeklyDigest,
+} from "./engagement-emails.js";
+import { optOutByToken } from "./engagement-prefs.js";
 import { sendAccountRegretEmail } from "./account-regret-email.js";
 import { blacklistEmail, getBlacklistForEmail, isEmailBlacklisted, isSchemaMissingError, loadBlacklistForEmails } from "./email-blacklist.js";
 import { fetchRowsInIdBatches } from "./query-batches.js";
@@ -117,7 +123,7 @@ if (process.env.VERCEL) {
       pathOnly !== "/" &&
       !pathOnly.startsWith("/api/") &&
       pathOnly !== "/api" &&
-      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin|prompts|earnings|health|monitoring|support|cron)\b/.test(
+      /^\/(auth|token-packs|topup|mpesa|applications|employer|admin|prompts|earnings|health|monitoring|support|cron|email)\b/.test(
         pathOnly
       );
     if (needsApi) {
@@ -823,6 +829,119 @@ app.get("/api/cron/token-expiry-reminders", async (req, res) => {
   } catch (error: any) {
     console.error("token-expiry-reminders cron:", error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/** Weekly cron (Monday): prompts & rewards digest for segments A/B. */
+app.get("/api/cron/weekly-engagement-digest", async (req, res) => {
+  if (!authorizeCron(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const result = await processWeeklyDigest(supabaseAdmin);
+    res.json(result);
+  } catch (error: any) {
+    console.error("weekly-engagement-digest cron:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * No-topup win-back: seekers past 3 days who never bought tokens.
+ * Also runs once on server boot (non-Vercel) so the backlog starts right after deploy.
+ */
+app.get("/api/cron/no-topup-triggers", async (req, res) => {
+  if (!authorizeCron(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const result = await processNoTopupTriggers(supabaseAdmin);
+    res.json(result);
+  } catch (error: any) {
+    console.error("no-topup-triggers cron:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Daily cron: near-withdraw + after-fail (+ no-topup backup). */
+app.get("/api/cron/engagement-triggers", async (req, res) => {
+  if (!authorizeCron(req)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const result = await processEngagementTriggers(supabaseAdmin);
+    res.json(result);
+  } catch (error: any) {
+    console.error("engagement-triggers cron:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Fire no-topup emails as soon as the long-running server comes up after deploy. */
+function scheduleNoTopupOnBoot() {
+  // Vercel serverless cold starts would re-run too often — rely on cron there.
+  if (process.env.VERCEL) return;
+  if (process.env.ENGAGEMENT_NO_TOPUP_ON_BOOT === "0") return;
+
+  const delayMs = Math.max(
+    0,
+    parseInt(process.env.ENGAGEMENT_NO_TOPUP_BOOT_DELAY_MS || "5000", 10) || 5000
+  );
+
+  setTimeout(() => {
+    console.log("[engagement] Running no-topup triggers on boot…");
+    processNoTopupTriggers(supabaseAdmin)
+      .then((result) => {
+        console.log(
+          `[engagement] no-topup boot done: sent=${result.sent} skipped=${result.skipped} errors=${result.errors.length}`
+        );
+        if (result.errors.length) {
+          console.warn("[engagement] no-topup boot errors:", result.errors.slice(0, 10));
+        }
+      })
+      .catch((err) => console.error("[engagement] no-topup boot failed:", err));
+  }, delayMs);
+}
+
+scheduleNoTopupOnBoot();
+
+/** One-click marketing unsubscribe (no login). */
+app.get("/api/email/unsubscribe", async (req, res) => {
+  try {
+    const token = String(req.query.token || "");
+    const result = await optOutByToken(supabaseAdmin, token);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || "Unable to unsubscribe" });
+    }
+    return res.json({
+      success: true,
+      message: "You have been unsubscribed from JobToken marketing emails.",
+      email: result.email,
+    });
+  } catch (error: any) {
+    console.error("GET /api/email/unsubscribe:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/email/unsubscribe", async (req, res) => {
+  try {
+    const token = String(req.body?.token || req.query.token || "");
+    const result = await optOutByToken(supabaseAdmin, token);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error || "Unable to unsubscribe" });
+    }
+    return res.json({
+      success: true,
+      message: "You have been unsubscribed from JobToken marketing emails.",
+      email: result.email,
+    });
+  } catch (error: any) {
+    console.error("POST /api/email/unsubscribe:", error);
+    return res.status(500).json({ error: error.message });
   }
 });
 

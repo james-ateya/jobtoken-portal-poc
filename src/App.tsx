@@ -35,6 +35,7 @@ import { TermsOfUsePage } from "./pages/TermsOfUsePage";
 import { ContactPage } from "./pages/ContactPage";
 import { TicketTrackPage } from "./pages/TicketTrackPage";
 import { AdminSupportPage } from "./pages/AdminSupportPage";
+import { EmailUnsubscribePage } from "./pages/EmailUnsubscribePage";
 import { AdminSupportBell } from "./components/AdminSupportBell";
 import { SessionExpiryGuard } from "./components/SessionExpiryGuard";
 import { logoutToHome } from "./lib/sessionExpiry";
@@ -319,6 +320,7 @@ export default function App() {
           <Route path="/terms" element={<TermsOfUsePage />} />
           <Route path="/contact" element={<ContactPage showToast={showToast} user={user} />} />
           <Route path="/support/track" element={<TicketTrackPage />} />
+          <Route path="/email/unsubscribe" element={<EmailUnsubscribePage />} />
           <Route
             path="/dashboard/profile"
             element={

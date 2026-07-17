@@ -6,6 +6,18 @@
     {
       "path": "/api/cron/token-expiry-reminders",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/weekly-engagement-digest",
+      "schedule": "0 4 * * 1"
+    },
+    {
+      "path": "/api/cron/no-topup-triggers",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/engagement-triggers",
+      "schedule": "30 5 * * *"
     }
   ],
   "rewrites": [
