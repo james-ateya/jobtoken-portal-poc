@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { Loader2, Coins, Banknote, Clock } from "lucide-react";
 import { cn } from "../lib/utils";
 import { apiFetch } from "../lib/apiFetch";
+import { attemptCostKes, formatPromptKes, getPromptTier } from "../lib/promptTier";
+import { PromptTierBadge } from "./PromptTierBadge";
 
 const PROMPT_ANSWER_MAX_SECONDS = 30 * 60;
 
@@ -23,12 +25,6 @@ export type PromptForSubmit = {
 
 function countWords(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
-}
-
-function formatKes(n: number | string): string {
-  const v = typeof n === "string" ? parseFloat(n) : Number(n ?? 0);
-  if (!Number.isFinite(v)) return "0";
-  return v.toLocaleString("en-KE", { maximumFractionDigits: 0 });
 }
 
 export function PromptSubmitModal({
@@ -156,6 +152,10 @@ export function PromptSubmitModal({
           >
             <div className="sticky top-0 flex items-start justify-between gap-4 p-5 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur z-10">
               <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <PromptTierBadge submitCostTokens={cost} />
+                  <span className="text-[10px] text-zinc-500">{getPromptTier(cost).hint}</span>
+                </div>
                 <h2 id="prompt-submit-title" className="text-lg font-bold text-white">
                   {prompt.headline}
                 </h2>
@@ -173,13 +173,13 @@ export function PromptSubmitModal({
                     <Clock className="w-5 h-5 shrink-0" />
                     {timeExpired ? "Time expired" : `${formatCountdown(secondsLeft)} left`}
                   </span>
+                  <span className="inline-flex items-center gap-1 text-xs text-zinc-300">
+                    <Coins className="w-3.5 h-3.5 text-amber-400" />
+                    {cost} tokens ({formatPromptKes(attemptCostKes(cost))} KES) to attempt
+                  </span>
                   <span className="inline-flex items-center gap-1 text-xs text-emerald-400/90">
                     <Banknote className="w-3.5 h-3.5" />
-                    {formatKes(prompt.reward_kes)} KES reward
-                  </span>
-                  <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
-                    <Coins className="w-3.5 h-3.5 text-amber-400" />
-                    {cost} tokens to submit
+                    Earn {formatPromptKes(prompt.reward_kes)} KES on pass
                   </span>
                   {prompt.word_limit != null ? (
                     <span className="text-xs text-zinc-400">Max {prompt.word_limit} words</span>
@@ -233,7 +233,8 @@ export function PromptSubmitModal({
                 </p>
               ) : tokenBalance < cost ? (
                 <p className="text-sm text-amber-500">
-                  You need {cost} tokens to submit this answer ({tokenBalance} available).
+                  You need {cost} tokens ({formatPromptKes(attemptCostKes(cost))} KES) to submit
+                  ({tokenBalance} available).
                 </p>
               ) : null}
 

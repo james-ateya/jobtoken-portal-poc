@@ -12,6 +12,10 @@ type QualityReport = {
   flags: string[];
   recommendation: "pass" | "review" | "fail";
   summary: string;
+  improvement_tips?: string[];
+  suggested_grading_note?: string;
+  confidence?: number;
+  economics_hint?: string | null;
   plagiarism?: { is_plagiarized: boolean; similarity_score: number };
 };
 
@@ -130,7 +134,13 @@ function GeminiQuotaBar({ quota, cooldownSec }: { quota: GeminiQuota | null; coo
   );
 }
 
-function RecommendationBadge({ rec }: { rec: "pass" | "review" | "fail" }) {
+function RecommendationBadge({
+  rec,
+  confidence,
+}: {
+  rec: "pass" | "review" | "fail";
+  confidence?: number;
+}) {
   const cls =
     rec === "pass"
       ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
@@ -138,9 +148,12 @@ function RecommendationBadge({ rec }: { rec: "pass" | "review" | "fail" }) {
         ? "bg-red-500/15 text-red-400 border-red-500/30"
         : "bg-amber-500/15 text-amber-400 border-amber-500/30";
   return (
-    <span className={cn("inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold uppercase border", cls)}>
+    <span className={cn("inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold uppercase border", cls)}>
       {rec === "pass" ? <CheckCircle className="w-3 h-3" /> : rec === "fail" ? <XCircle className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
-      {rec}
+      AI suggests {rec}
+      {confidence != null ? (
+        <span className="normal-case font-semibold opacity-80">· {confidence}% conf.</span>
+      ) : null}
     </span>
   );
 }
@@ -346,13 +359,21 @@ export function PromptSubmissionReviewModal({
             {qr ? (
               <>
                 <div className="flex items-center gap-3 flex-wrap">
-                  <RecommendationBadge rec={qr.recommendation} />
+                  <RecommendationBadge rec={qr.recommendation} confidence={qr.confidence} />
                   {submission.quality_checked_at && (
                     <span className="text-[10px] text-zinc-600">
                       Checked {new Date(submission.quality_checked_at).toLocaleString()}
                     </span>
                   )}
                 </div>
+                <p className="text-[11px] text-zinc-500">
+                  Guidance only — you confirm Pass or Fail. AI never grades automatically.
+                </p>
+                {qr.economics_hint ? (
+                  <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-xs text-amber-200">
+                    <span className="font-bold">Economics:</span> {qr.economics_hint}
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <ScoreBar label="AI probability" value={qr.ai_probability} invertColor />
                   <ScoreBar label="Relevance" value={qr.relevance_score} />
@@ -374,6 +395,34 @@ export function PromptSubmissionReviewModal({
                 {qr.summary && (
                   <p className="text-xs text-zinc-400 leading-relaxed">{qr.summary}</p>
                 )}
+                {qr.improvement_tips && qr.improvement_tips.length > 0 ? (
+                  <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 space-y-1.5">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+                      Improvement tips for seeker
+                    </p>
+                    <ul className="list-disc list-inside space-y-1 text-xs text-zinc-300">
+                      {qr.improvement_tips.map((tip, i) => (
+                        <li key={i}>{tip}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {(qr.suggested_grading_note || (qr.improvement_tips && qr.improvement_tips.length > 0)) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const note =
+                        qr.suggested_grading_note?.trim() ||
+                        `Thanks for submitting. To improve:\n${(qr.improvement_tips ?? [])
+                          .map((t, i) => `${i + 1}. ${t}`)
+                          .join("\n")}`;
+                      setGradingNote(note);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 hover:bg-emerald-500/20"
+                  >
+                    Use suggested note
+                  </button>
+                )}
               </>
             ) : (
               <div className="space-y-2">
@@ -390,12 +439,23 @@ export function PromptSubmissionReviewModal({
           </div>
 
           <div>
-            <label
-              htmlFor="grading-note"
-              className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 block mb-2"
-            >
-              Feedback note (emailed to seeker)
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <label
+                htmlFor="grading-note"
+                className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 block"
+              >
+                Feedback note (emailed to seeker)
+              </label>
+              {qr?.suggested_grading_note ? (
+                <button
+                  type="button"
+                  onClick={() => setGradingNote(qr.suggested_grading_note || "")}
+                  className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300"
+                >
+                  Fill from AI
+                </button>
+              ) : null}
+            </div>
             <textarea
               id="grading-note"
               rows={4}
@@ -405,7 +465,7 @@ export function PromptSubmissionReviewModal({
               className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-4 py-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 resize-y min-h-[96px]"
             />
             <p className="text-xs text-zinc-500 mt-2">
-              A review email is sent when you pass or fail. Your note helps seekers understand the decision.
+              A review email is sent when you pass or fail. On fail, include clear improvement tips for returning seekers.
             </p>
           </div>
         </div>

@@ -14,6 +14,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { PromptSubmitModal, type PromptForSubmit } from "../components/PromptSubmitModal";
+import { PromptTierBadge } from "../components/PromptTierBadge";
+import { attemptCostKes, formatPromptKes } from "../lib/promptTier";
 import { cn } from "../lib/utils";
 
 type SeriesPayload = {
@@ -28,12 +30,6 @@ type PromptRow = PromptForSubmit & {
   is_published: boolean;
   created_at: string;
 };
-
-function formatKes(n: number | string): string {
-  const v = typeof n === "string" ? parseFloat(n) : Number(n ?? 0);
-  if (!Number.isFinite(v)) return "0";
-  return v.toLocaleString("en-KE", { maximumFractionDigits: 0 });
-}
 
 function gradeBadge(status: string) {
   if (status === "pass")
@@ -205,6 +201,12 @@ export function PromptSeriesDetailPage({
                 {series.description ? (
                   <p className="text-zinc-500 mt-2 max-w-2xl whitespace-pre-wrap">{series.description}</p>
                 ) : null}
+                <p className="text-xs text-zinc-500 mt-3 max-w-2xl">
+                  Tip: start with <span className="text-sky-300 font-medium">Starter</span> tasks
+                  (fewer tokens).{" "}
+                  <span className="text-amber-200/90 font-medium">Premium</span> means a higher
+                  attempt cost for a larger reward on pass.
+                </p>
               </div>
               <Link
                 to="/dashboard"
@@ -251,15 +253,18 @@ export function PromptSeriesDetailPage({
                     >
                       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                         <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 mb-2">
+                            <PromptTierBadge submitCostTokens={p.submit_cost_tokens} />
+                          </div>
                           <h3 className="font-bold text-white text-lg">{p.headline}</h3>
                           <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-zinc-400">
                             <span className="inline-flex items-center gap-1.5">
-                              <Banknote className="w-3.5 h-3.5 text-emerald-400" />
-                              {formatKes(p.reward_kes)} KES
+                              <Coins className="w-3.5 h-3.5 text-amber-400" />
+                              {p.submit_cost_tokens} tokens ({formatPromptKes(attemptCostKes(p.submit_cost_tokens))} KES)
                             </span>
                             <span className="inline-flex items-center gap-1.5">
-                              <Coins className="w-3.5 h-3.5 text-amber-400" />
-                              {p.submit_cost_tokens} tokens
+                              <Banknote className="w-3.5 h-3.5 text-emerald-400" />
+                              Earn {formatPromptKes(p.reward_kes)} KES on pass
                             </span>
                             {p.word_limit != null ? (
                               <span>Up to {p.word_limit} words</span>

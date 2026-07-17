@@ -1,10 +1,10 @@
 import { Link } from "react-router-dom";
 import { motion } from "motion/react";
 import { LayoutDashboard, PenLine } from "lucide-react";
-import { PromptSeriesCards } from "../components/PromptSeriesCards";
+import { PromptTieredBrowse } from "../components/PromptTieredBrowse";
 
 export function PromptSeriesBrowsePage({
-  user: _user,
+  user,
   showToast: _showToast,
 }: {
   user: any;
@@ -20,8 +20,8 @@ export function PromptSeriesBrowsePage({
               Prompt tasks
             </h1>
             <p className="text-zinc-500 mt-1 text-sm sm:text-base max-w-xl">
-              Complete short written tasks. Each submission costs tokens; if your answer passes review,
-              you earn KES credited to your earnings balance.
+              Filters stay at the top. All mixes tiers in batches of 10 — Starter, then Core, then
+              Premium. Pick a single tier to see only that ladder.
             </p>
           </div>
           <Link
@@ -38,7 +38,7 @@ export function PromptSeriesBrowsePage({
           animate={{ opacity: 1, y: 0 }}
           className="p-6 sm:p-8 rounded-3xl border border-white/10 bg-white/[0.02]"
         >
-          <PromptSeriesCards compact={false} />
+          <PromptTieredBrowse user={user} fullCatalog />
         </motion.div>
       </div>
     </div>

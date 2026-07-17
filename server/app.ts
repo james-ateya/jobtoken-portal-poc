@@ -3202,72 +3202,173 @@ app.get("/api/prompts/series", async (_req, res) => {
     const list = series ?? [];
     const ids = list.map((s) => s.id);
     const counts: Record<string, number> = {};
+    const minTokens: Record<string, number> = {};
+    const maxReward: Record<string, number> = {};
     if (ids.length) {
-      const { data: prompts } = await supabaseAdmin
-        .from("prompts")
-        .select("series_id")
-        .in("series_id", ids)
-        .eq("is_published", true);
-      for (const p of prompts ?? []) {
-        const sid = (p as { series_id: string }).series_id;
+      const pageSize = 1000;
+      const prompts = await fetchRowsInIdBatches(
+        ids,
+        async (chunk) => {
+          const all: any[] = [];
+          let from = 0;
+          for (;;) {
+            const { data, error } = await supabaseAdmin
+              .from("prompts")
+              .select("series_id, submit_cost_tokens, reward_kes")
+              .in("series_id", chunk)
+              .eq("is_published", true)
+              .order("id", { ascending: true })
+              .range(from, from + pageSize - 1);
+            if (error) return { data: null, error };
+            const page = data ?? [];
+            all.push(...page);
+            if (page.length < pageSize) break;
+            from += pageSize;
+          }
+          return { data: all, error: null };
+        },
+        40
+      );
+      for (const p of prompts) {
+        const row = p as { series_id: string; submit_cost_tokens: number; reward_kes: number | string };
+        const sid = row.series_id;
         counts[sid] = (counts[sid] || 0) + 1;
+        const cost = Number(row.submit_cost_tokens) || 0;
+        const reward = Number(row.reward_kes) || 0;
+        if (minTokens[sid] == null || cost < minTokens[sid]) minTokens[sid] = cost;
+        if (maxReward[sid] == null || reward > maxReward[sid]) maxReward[sid] = reward;
       }
     }
 
+    const tierFor = (tokens: number) => {
+      if (tokens <= 6) return "starter";
+      if (tokens <= 20) return "core";
+      return "premium";
+    };
+
     res.json({
-      series: list.map((s) => ({
-        ...s,
-        prompt_count: counts[s.id] ?? 0,
-      })),
+      series: list.map((s) => {
+        const min = minTokens[s.id] ?? 0;
+        return {
+          ...s,
+          prompt_count: counts[s.id] ?? 0,
+          min_submit_cost_tokens: min || null,
+          max_reward_kes: maxReward[s.id] ?? null,
+          entry_tier: counts[s.id] ? tierFor(min) : null,
+        };
+      }),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-/** Public teaser list for the landing page: prompts under published series (headline, instructions, economics). */
-app.get("/api/prompts/home-preview", async (_req, res) => {
-  const limit = 10;
+function promptTierId(tokens: number): "starter" | "core" | "premium" {
+  if (tokens <= 6) return "starter";
+  if (tokens <= 20) return "core";
+  return "premium";
+}
+
+/** Mix tiers in batches of 10: Starter → Core → Premium, then next batch of each. */
+function batchMixPromptsByTier<T extends { submit_cost_tokens: number }>(items: T[], batchSize = 10): T[] {
+  const buckets: Record<"starter" | "core" | "premium", T[]> = {
+    starter: [],
+    core: [],
+    premium: [],
+  };
+  const sorted = [...items].sort((a, b) => {
+    const ta = promptTierId(Number(a.submit_cost_tokens) || 0);
+    const tb = promptTierId(Number(b.submit_cost_tokens) || 0);
+    const rank = { starter: 0, core: 1, premium: 2 };
+    if (rank[ta] !== rank[tb]) return rank[ta] - rank[tb];
+    return (Number(a.submit_cost_tokens) || 0) - (Number(b.submit_cost_tokens) || 0);
+  });
+  for (const item of sorted) {
+    buckets[promptTierId(Number(item.submit_cost_tokens) || 0)].push(item);
+  }
+  const out: T[] = [];
+  let offset = 0;
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const tier of ["starter", "core", "premium"] as const) {
+      const slice = buckets[tier].slice(offset, offset + batchSize);
+      if (slice.length) {
+        out.push(...slice);
+        progressed = true;
+      }
+    }
+    offset += batchSize;
+  }
+  return out;
+}
+
+async function loadPublishedPromptCatalog() {
+  const { data: publishedSeries, error: se } = await supabaseAdmin
+    .from("prompt_series")
+    .select("id, title")
+    .eq("status", "published");
+  if (se) throw se;
+  const seriesRows = publishedSeries ?? [];
+  if (seriesRows.length === 0) return [] as any[];
+
+  const titleBySeriesId: Record<string, string> = {};
+  for (const row of seriesRows) {
+    titleBySeriesId[(row as { id: string }).id] = (row as { title: string }).title;
+  }
+  const seriesIds = seriesRows.map((r) => (r as { id: string }).id);
+
+  // Paginate + batch by series_id — a single .in() without .range() was only returning
+  // a tiny page (often ~10 rows), so Starter/Core prompts never reached the UI.
+  const pageSize = 1000;
+  const prompts = await fetchRowsInIdBatches(
+    seriesIds,
+    async (chunk) => {
+      const all: any[] = [];
+      let from = 0;
+      for (;;) {
+        const { data, error } = await supabaseAdmin
+          .from("prompts")
+          .select(
+            "id, headline, instructions, reward_kes, submit_cost_tokens, series_id, sort_order, created_at"
+          )
+          .in("series_id", chunk)
+          .eq("is_published", true)
+          .order("id", { ascending: true })
+          .range(from, from + pageSize - 1);
+        if (error) return { data: null, error };
+        const page = data ?? [];
+        all.push(...page);
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
+      return { data: all, error: null };
+    },
+    40
+  );
+
+  return prompts.map((p: any) => ({
+    id: p.id,
+    headline: p.headline,
+    instructions: p.instructions,
+    reward_kes: p.reward_kes,
+    submit_cost_tokens: p.submit_cost_tokens,
+    series_id: p.series_id,
+    series_title: titleBySeriesId[p.series_id] ?? null,
+  }));
+}
+
+/** Public teaser list: tier batch-mix (10 starter → 10 core → 10 premium…). Use ?full=1 for complete catalog. */
+app.get("/api/prompts/home-preview", async (req, res) => {
+  const full = req.query.full === "1" || req.query.full === "true";
   try {
-    const { data: publishedSeries, error: se } = await supabaseAdmin
-      .from("prompt_series")
-      .select("id, title")
-      .eq("status", "published");
-
-    if (se) throw se;
-    const seriesRows = publishedSeries ?? [];
-    if (seriesRows.length === 0) {
-      return res.json({ prompts: [] });
-    }
-
-    const titleBySeriesId: Record<string, string> = {};
-    for (const row of seriesRows) {
-      titleBySeriesId[(row as { id: string }).id] = (row as { title: string }).title;
-    }
-    const seriesIds = seriesRows.map((r) => (r as { id: string }).id);
-
-    const { data: prompts, error: pe } = await supabaseAdmin
-      .from("prompts")
-      .select("id, headline, instructions, reward_kes, submit_cost_tokens, series_id, sort_order")
-      .in("series_id", seriesIds)
-      .eq("is_published", true)
-      .order("created_at", { ascending: false })
-      .limit(limit);
-
-    if (pe) throw pe;
-
-    const list = (prompts ?? []).map((p: any) => ({
-      id: p.id,
-      headline: p.headline,
-      instructions: p.instructions,
-      reward_kes: p.reward_kes,
-      submit_cost_tokens: p.submit_cost_tokens,
-      series_id: p.series_id,
-      series_title: titleBySeriesId[p.series_id] ?? null,
-    }));
-
+    const catalog = await loadPublishedPromptCatalog();
+    const mixed = batchMixPromptsByTier(catalog, 10);
+    // Homepage default: first full round (up to 30). Full catalog for dashboard/prompts browse.
+    const list = full ? mixed : mixed.slice(0, 30);
     res.json({ prompts: list });
   } catch (error: any) {
+    console.error("home-preview:", error);
     res.status(500).json({ error: error.message });
   }
 });

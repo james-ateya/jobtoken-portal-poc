@@ -28,7 +28,7 @@ import {
   PenLine,
   Gift,
 } from "lucide-react";
-import { PromptSeriesCards } from "../components/PromptSeriesCards";
+import { PromptTieredBrowse } from "../components/PromptTieredBrowse";
 import { cn } from "../lib/utils";
 import { applicationStatusLabel, applicationStatusTone } from "../lib/applicationStatus";
 
@@ -524,8 +524,7 @@ export function DashboardPage({
                 <div>
                   <h3 className="text-xl font-bold text-white">Earn KES — prompt tasks</h3>
                   <p className="text-sm text-zinc-500 mt-0.5">
-                    Short writing tasks: pay tokens to submit, earn KES when approved. Opens in a new
-                    section of your dashboard.
+                    Sorted Starter → Core → Premium. All mixes batches of 10 per tier.
                   </p>
                 </div>
               </div>
@@ -533,10 +532,10 @@ export function DashboardPage({
                 to="/dashboard/prompts"
                 className="text-xs font-bold text-emerald-400 hover:text-emerald-300 uppercase tracking-wider shrink-0"
               >
-                Full list
+                View all
               </Link>
             </div>
-            <PromptSeriesCards compact />
+            <PromptTieredBrowse user={user} fullCatalog={false} maxVisible={10} showViewAllLink />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
