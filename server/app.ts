@@ -4457,10 +4457,11 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
 
 app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (_req, res) => {
   try {
+    // Net earned = reward credits minus grade reversals (fail after pass, etc.)
     const { data: creditRows } = await supabaseAdmin
       .from("earnings_ledger")
       .select("amount_kes")
-      .eq("entry_type", "reward_credit");
+      .in("entry_type", ["reward_credit", "reversal"]);
     const totalEarningsCredited = (creditRows ?? []).reduce(
       (sum, r) => sum + Number(r.amount_kes ?? 0), 0
     );
@@ -4476,7 +4477,7 @@ app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (
     const { data: adjustmentRows } = await supabaseAdmin
       .from("earnings_ledger")
       .select("amount_kes")
-      .in("entry_type", ["adjustment", "reversal"]);
+      .eq("entry_type", "adjustment");
     const totalAdjustments = (adjustmentRows ?? []).reduce(
       (sum, r) => sum + Number(r.amount_kes ?? 0), 0
     );
