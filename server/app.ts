@@ -4457,14 +4457,19 @@ app.get("/api/admin/withdrawal-requests", requireAdminMw, async (req, res) => {
 
 app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (_req, res) => {
   try {
-    // Net earned = reward credits minus grade reversals (fail after pass, etc.)
-    const { data: creditRows } = await supabaseAdmin
+    // Same net rewards query as /api/admin/platform-health (Total Rewards Paid)
+    const { data: rewards, error: rewardsErr } = await supabaseAdmin
       .from("earnings_ledger")
-      .select("amount_kes")
-      .in("entry_type", ["reward_credit", "reversal"]);
-    const totalEarningsCredited = (creditRows ?? []).reduce(
-      (sum, r) => sum + Number(r.amount_kes ?? 0), 0
+      .select("amount_kes, entry_type")
+      .in("entry_type", ["reward_credit", "adjustment", "reversal"]);
+    if (rewardsErr) throw rewardsErr;
+    const totalEarningsCredited = (rewards ?? []).reduce(
+      (sum, r) => sum + Number(r.amount_kes ?? 0),
+      0
     );
+    const totalAdjustments = (rewards ?? [])
+      .filter((r) => r.entry_type === "adjustment")
+      .reduce((sum, r) => sum + Number(r.amount_kes ?? 0), 0);
 
     const { data: payoutRows } = await supabaseAdmin
       .from("earnings_ledger")
@@ -4472,14 +4477,6 @@ app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (
       .eq("entry_type", "withdrawal_payout");
     const totalPaidOut = (payoutRows ?? []).reduce(
       (sum, r) => sum + Math.abs(Number(r.amount_kes ?? 0)), 0
-    );
-
-    const { data: adjustmentRows } = await supabaseAdmin
-      .from("earnings_ledger")
-      .select("amount_kes")
-      .eq("entry_type", "adjustment");
-    const totalAdjustments = (adjustmentRows ?? []).reduce(
-      (sum, r) => sum + Number(r.amount_kes ?? 0), 0
     );
 
     const { data: allWr } = await supabaseAdmin
@@ -4505,7 +4502,8 @@ app.get("/api/admin/withdrawal-requests/payout-summary", requireAdminMw, async (
       else if (r.status === "rejected") rejectedCount++;
     }
 
-    const outstandingBalance = Math.round((totalEarningsCredited + totalAdjustments - totalPaidOut) * 100) / 100;
+    // total_earnings_credited already nets adjustments + reversals
+    const outstandingBalance = Math.round((totalEarningsCredited - totalPaidOut) * 100) / 100;
 
     res.json({
       total_earnings_credited: Math.round(totalEarningsCredited * 100) / 100,

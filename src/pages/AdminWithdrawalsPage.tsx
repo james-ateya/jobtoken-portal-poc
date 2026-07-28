@@ -332,7 +332,7 @@ export function AdminWithdrawalsPage({
                 <p className="text-xl font-black text-emerald-400 tabular-nums">
                   {fmtKes(summary.total_earnings_credited)}
                 </p>
-                <p className="text-[10px] text-zinc-600 mt-1">KES credited to seekers</p>
+                <p className="text-[10px] text-zinc-600 mt-1">KES net of reversals &amp; adjustments</p>
               </div>
 
               <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
@@ -355,7 +355,10 @@ export function AdminWithdrawalsPage({
                   {fmtKes(summary.outstanding_balance)}
                 </p>
                 <p className="text-[10px] text-zinc-600 mt-1">
-                  Earned {summary.total_adjustments !== 0 ? `+ adjustments (${fmtKes(summary.total_adjustments)}) ` : ""}minus paid out
+                  Net earned minus paid out
+                  {summary.total_adjustments !== 0
+                    ? ` (incl. adjustments ${fmtKes(summary.total_adjustments)})`
+                    : ""}
                 </p>
               </div>
 
