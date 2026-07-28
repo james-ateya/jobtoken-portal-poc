@@ -2164,52 +2164,44 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       role === "seeker" || role === "employer" || role === "admin" ? role : null;
     const searchQuery = normalizeAdminSearchQuery(req.query.q ?? req.query.search);
 
-    let countQ = supabaseAdmin
-      .from("profiles")
-      .select("*", { count: "exact", head: true })
-      .in("role", ["seeker", "employer", "admin"]);
-    if (roleFilter) countQ = countQ.eq("role", roleFilter);
-    if (searchQuery) {
-      countQ = countQ.or(buildProfileSearchOrFilter(searchQuery));
+    let earningsByUser = new Map<string, number>();
+    try {
+      earningsByUser = await loadEarningsBalancesMap(supabaseAdmin);
+    } catch {
+      /* view may not exist yet */
     }
 
-    const { count: total, error: countErr } = await countQ;
-    if (countErr) throw countErr;
+    // Load all matching profiles first so we can sort by earnings (not a profiles column),
+    // then paginate. Supabase caps a single .range() page at 1000 rows.
+    const batchSize = 1000;
+    const allProfileRows: Record<string, unknown>[] = [];
+    let fetchFrom = 0;
+    let useBaseFieldsOnly = false;
 
-    let q = supabaseAdmin
-      .from("profiles")
-      .select(`${profileFieldsBase}, deactivation_reason`)
-      .in("role", ["seeker", "employer", "admin"])
-      .order("email", { ascending: true })
-      .range(from, to);
-
-    if (roleFilter) q = q.eq("role", roleFilter);
-    if (searchQuery) {
-      q = q.or(buildProfileSearchOrFilter(searchQuery));
-    }
-
-    let profileRows: Record<string, unknown>[] | null = null;
-    let { data, error } = await q;
-    if (error && isSchemaMissingError(error)) {
-      let fallbackQ = supabaseAdmin
+    for (;;) {
+      let q = supabaseAdmin
         .from("profiles")
-        .select(profileFieldsBase)
+        .select(useBaseFieldsOnly ? profileFieldsBase : `${profileFieldsBase}, deactivation_reason`)
         .in("role", ["seeker", "employer", "admin"])
         .order("email", { ascending: true })
-        .range(from, to);
-      if (roleFilter) fallbackQ = fallbackQ.eq("role", roleFilter);
-      if (searchQuery) {
-        fallbackQ = fallbackQ.or(buildProfileSearchOrFilter(searchQuery));
-      }
-      const fallback = await fallbackQ;
-      profileRows = fallback.data;
-      error = fallback.error;
-    } else {
-      profileRows = data;
-    }
-    if (error) throw error;
+        .range(fetchFrom, fetchFrom + batchSize - 1);
+      if (roleFilter) q = q.eq("role", roleFilter);
+      if (searchQuery) q = q.or(buildProfileSearchOrFilter(searchQuery));
 
-    const profiles = (profileRows ?? []).map((row) => {
+      let { data, error } = await q;
+      if (error && isSchemaMissingError(error) && !useBaseFieldsOnly) {
+        useBaseFieldsOnly = true;
+        continue;
+      }
+      if (error) throw error;
+
+      const rows = data ?? [];
+      allProfileRows.push(...rows);
+      if (rows.length < batchSize) break;
+      fetchFrom += batchSize;
+    }
+
+    const allProfiles = allProfileRows.map((row) => {
       const profile = row as Record<string, unknown> & {
         id: string;
         email?: string | null;
@@ -2220,8 +2212,20 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       return {
         ...profile,
         deactivation_reason: profile.deactivation_reason ?? null,
+        earnings_balance_kes: earningsByUser.get(profile.id) ?? 0,
       };
     });
+
+    allProfiles.sort((a, b) => {
+      const earningsDiff = (b.earnings_balance_kes ?? 0) - (a.earnings_balance_kes ?? 0);
+      if (earningsDiff !== 0) return earningsDiff;
+      return String(a.email || "").localeCompare(String(b.email || ""), undefined, {
+        sensitivity: "base",
+      });
+    });
+
+    const total = allProfiles.length;
+    const profiles = allProfiles.slice(from, to + 1);
     const userIds = profiles.map((p) => p.id as string);
 
     const walletByUser = new Map<string, number>();
@@ -2230,11 +2234,6 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       .map((p) => String(p.email || ""))
       .filter((email) => email.length > 0);
     const blacklistByEmail = await loadBlacklistForEmails(supabaseAdmin, pageEmails);
-
-    let earningsByUser = new Map<string, number>();
-    try {
-      earningsByUser = await loadEarningsBalancesMap(supabaseAdmin);
-    } catch { /* view may not exist yet */ }
 
     if (userIds.length > 0) {
       const creditTypes = ["topup", "token_gift", "earnings_token_redemption", "coupon_bonus"];
@@ -2289,7 +2288,7 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
       return {
         ...profile,
         token_balance: tokenBalance,
-        earnings_balance_kes: earningsByUser.get(profile.id as string) ?? 0,
+        earnings_balance_kes: profile.earnings_balance_kes ?? 0,
         days_since_registration: daysSinceRegistration,
         has_ever_topped_up: hasEverToppedUp,
         needs_topup_attention:
@@ -2303,7 +2302,7 @@ app.get("/api/admin/users", requireAdminMw, async (req, res) => {
     res.json({
       users,
       search: searchQuery,
-      ...paginationMeta(total ?? 0, page, pageSize),
+      ...paginationMeta(total, page, pageSize),
     });
   } catch (error: any) {
     console.error("GET /api/admin/users:", error);
