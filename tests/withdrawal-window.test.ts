@@ -34,10 +34,10 @@ describe("withdrawal window", () => {
     expect(formatWithdrawalWindowDate(next)).toBe("2026-10-06");
   });
 
-  it("defaults minimum withdrawal to 5000 KES", () => {
+  it("defaults minimum withdrawal to 500 KES", () => {
     const previous = process.env.EARNINGS_MIN_WITHDRAWAL_KES;
     delete process.env.EARNINGS_MIN_WITHDRAWAL_KES;
-    expect(getMinimumWithdrawalKes()).toBe(5000);
+    expect(getMinimumWithdrawalKes()).toBe(500);
     process.env.EARNINGS_MIN_WITHDRAWAL_KES = previous;
   });
 });

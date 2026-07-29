@@ -78,7 +78,7 @@ export function SeekerEarningsPage({
   const [submitting, setSubmitting] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [amountInput, setAmountInput] = useState("");
-  const [minWithdrawalKes, setMinWithdrawalKes] = useState(1500);
+  const [minWithdrawalKes, setMinWithdrawalKes] = useState(500);
   const [canRequestWithdrawal, setCanRequestWithdrawal] = useState(false);
   const [kesPerToken, setKesPerToken] = useState(20);
   const [tokenExchangeEnabled, setTokenExchangeEnabled] = useState(false);
@@ -120,7 +120,7 @@ export function SeekerEarningsPage({
       }
       const sumJson = await sumRes.json();
       setBalanceKes(Number(sumJson.balance_kes ?? 0));
-      setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 1500));
+      setMinWithdrawalKes(Number(sumJson.minimum_withdrawal_kes ?? 500));
       setCanRequestWithdrawal(Boolean(sumJson.can_request_withdrawal));
 
       if (exchangeRes.ok) {

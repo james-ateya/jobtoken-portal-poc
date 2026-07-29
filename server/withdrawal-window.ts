@@ -28,10 +28,10 @@ export function getWithdrawalScheduleDescription(): string {
   return "Withdrawals are available anytime once you reach the minimum balance.";
 }
 
-/** Minimum KES balance that may be requested per withdrawal (default 1,500). */
+/** Minimum KES balance that may be requested per withdrawal (default 500). */
 export function getMinimumWithdrawalKes(): number {
-  const raw = parseInt(process.env.EARNINGS_MIN_WITHDRAWAL_KES || "1500", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw : 1500;
+  const raw = parseInt(process.env.EARNINGS_MIN_WITHDRAWAL_KES || "500", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 500;
 }
 
 export function formatWithdrawalWindowDate(date: Date): string {
